@@ -214,7 +214,8 @@ mod contract {
             .checked_sub(fee)
             .ok_or(Error::ArithmeticOverflow)?;
 
-        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env).unwrap();
+        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env)
+            .ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &pool.token);
         let contract_address = env.current_contract_address();
 
@@ -323,6 +324,15 @@ mod contract {
         pool.balance = pool
             .balance
             .checked_sub(transfer_amount)
+            .ok_or(Error::ArithmeticOverflow)?;
+        // A reclaim is a capital outflow and must be tracked the same way as a
+        // normal withdrawal, so that get_pool and any off-chain accounting that
+        // reads total_withdrawn always reflects the full amount that left the
+        // pool. Without this update, reclaimed funds appear as "still in" the
+        // pool, breaking balance invariants. (#485)
+        pool.total_withdrawn = pool
+            .total_withdrawn
+            .checked_add(deposit.amount)
             .ok_or(Error::ArithmeticOverflow)?;
         env.storage().persistent().set(&pkey, &pool);
         extend_ttl(&env, &pkey);
