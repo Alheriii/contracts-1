@@ -299,16 +299,30 @@ mod contract {
             return Err(Error::InactivityWindowNotElapsed);
         }
 
+        // Reject a second reclaim before any other check so we never
+        // transfer from a zeroed record (#479).
+        if deposit.amount == 0 {
+            return Err(Error::AlreadyReclaimed);
+        }
+
         if deposit.amount > pool.balance {
             return Err(Error::InsufficientBalance);
         }
 
+        let transfer_amount = deposit.amount;
+
+        // Zero the deposit record **before** the transfer so a re-entrant or
+        // repeated call cannot drain other sponsors' funds (#479).
+        let mut zeroed = deposit.clone();
+        zeroed.amount = 0;
+        env.storage().persistent().set(&dkey, &zeroed);
+
         let token_client = token::Client::new(&env, &pool.token);
-        token_client.transfer(&env.current_contract_address(), &sponsor, &deposit.amount);
+        token_client.transfer(&env.current_contract_address(), &sponsor, &transfer_amount);
 
         pool.balance = pool
             .balance
-            .checked_sub(deposit.amount)
+            .checked_sub(transfer_amount)
             .ok_or(Error::ArithmeticOverflow)?;
         env.storage().persistent().set(&pkey, &pool);
         extend_ttl(&env, &pkey);
