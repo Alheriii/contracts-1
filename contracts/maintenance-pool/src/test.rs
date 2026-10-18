@@ -3,7 +3,7 @@
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, Address, Env,
+    token, vec, Address, Env,
 };
 
 fn create_token<'a>(
@@ -108,7 +108,7 @@ fn test_withdraw_deducts_fee_and_balance() {
     client.deposit(&2u64, &sponsor, &token_addr, &10_000_000_000i128);
 
     let maintainer = Address::generate(&env);
-    client.withdraw(&2u64, &maintainer, &200_0000000i128);
+    client.withdraw(&2u64, &vec![&env, (maintainer.clone(), 10_000u32)], &200_0000000i128);
 
     // 10% fee -> 20_0000000 to treasury, 180_0000000 to maintainer.
     assert_eq!(token_client.balance(&maintainer), 180_0000000i128);
@@ -137,7 +137,7 @@ fn test_withdraw_with_zero_fee_pays_full_amount() {
     client.deposit(&2u64, &sponsor, &token_addr, &10_000_000_000i128);
 
     let maintainer = Address::generate(&env);
-    client.withdraw(&2u64, &maintainer, &200_0000000i128);
+    client.withdraw(&2u64, &vec![&env, (maintainer.clone(), 10_000u32)], &200_0000000i128);
 
     assert_eq!(token_client.balance(&maintainer), 200_0000000i128);
     assert_eq!(token_client.balance(&treasury), 0i128);
@@ -326,7 +326,7 @@ fn test_withdraw_exact_balance_boundary() {
     assert_eq!(err, Err(Ok(Error::InsufficientBalance)));
 
     // Exactly the pool's balance must succeed and drain it to zero.
-    client.withdraw(&7u64, &maintainer, &500_0000000i128);
+    client.withdraw(&7u64, &vec![&env, (maintainer.clone(), 10_000u32)], &500_0000000i128);
     let pool = client.get_pool(&7u64);
     assert_eq!(pool.balance, 0i128);
     assert_eq!(pool.total_withdrawn, 500_0000000i128);
@@ -360,7 +360,7 @@ fn test_interleaved_deposit_withdraw_consistency() {
         assert_eq!(pool.balance, total_deposited - total_withdrawn);
 
         if withdraw_amt > 0 {
-            client.withdraw(&8u64, &maintainer, &withdraw_amt);
+            client.withdraw(&8u64, &vec![&env, (maintainer.clone(), 10_000u32)], &withdraw_amt);
             total_withdrawn += withdraw_amt;
 
             let pool = client.get_pool(&8u64);
@@ -528,7 +528,7 @@ fn test_sweep_cannot_remove_owed_balances() {
 
     // Withdrawal should still work for the full pool balance
     let maintainer_balance_before = token_client.balance(&maintainer);
-    client.withdraw(&1u64, &maintainer, &100_0000000i128); // 10% fee = 10, payout = 90
+    client.withdraw(&1u64, &vec![&env, (maintainer.clone(), 10_000u32)], &100_0000000i128); // 10% fee = 10, payout = 90
     let maintainer_balance_after = token_client.balance(&maintainer);
 
     // Maintainer should receive (100 - 10% fee) = 90
@@ -646,7 +646,7 @@ fn test_recover_withdraw_frozen_before_recoverable_after() {
     client.recover_admin(&new_admin);
     // New admin withdraws successfully (mocked auth enables it)
     env.mock_all_auths();
-    client.withdraw(&42u64, &maintainer, &1_000_000_000i128);
+    client.withdraw(&42u64, &vec![&env, (maintainer.clone(), 10_000u32)], &1_000_000_000i128);
     assert_eq!(token_client.balance(&maintainer), 900_000_000i128); // after 10% fee
 }
 
@@ -908,7 +908,7 @@ fn test_upgrade_preserves_pool_with_multiple_deposits() {
     assert_eq!(client.get_deposit(&246u64, &3u32).sponsor, late_sponsor);
 
     let maintainer = Address::generate(&env);
-    client.withdraw(&246u64, &maintainer, &1_000i128);
+    client.withdraw(&246u64, &vec![&env, (maintainer.clone(), 10_000u32)], &1_000i128);
     let pool_after = client.get_pool(&246u64);
     assert_eq!(pool_after.balance, 5_500i128);
     assert_eq!(pool_after.total_withdrawn, 1_000i128);
@@ -948,7 +948,7 @@ fn test_set_oracle_rotates_oracle_used_by_withdraw() {
     client.deposit(&7u64, &sponsor, &token_addr, &100_0000000i128);
 
     let maintainer = Address::generate(&env);
-    client.withdraw(&7u64, &maintainer, &50_0000000i128);
+    client.withdraw(&7u64, &vec![&env, (maintainer.clone(), 10_000u32)], &50_0000000i128);
 
     // withdraw now requires the rotated oracle's authorization, not the old one's.
     let auths = env.auths();
@@ -986,7 +986,7 @@ fn test_set_treasury_updates_fee_recipient() {
     client.deposit(&253u64, &sponsor, &token_addr, &10_000_000_000i128);
 
     let maintainer = Address::generate(&env);
-    client.withdraw(&253u64, &maintainer, &200_0000000i128);
+    client.withdraw(&253u64, &vec![&env, (maintainer.clone(), 10_000u32)], &200_0000000i128);
 
     // 10% fee lands on the new treasury, none on the old one.
     assert_eq!(token_client.balance(&new_treasury), 20_0000000i128);

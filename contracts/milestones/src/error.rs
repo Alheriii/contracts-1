@@ -37,4 +37,8 @@ pub enum Error {
     /// `i128::MAX`). Returned instead of panicking under release
     /// `overflow-checks = true` + `panic = "abort"`.
     ArithmeticOverflow = 21,
+    /// `allocate` was called on a milestone whose deadline has already passed
+    /// (#489). Once past the deadline, sponsors may cancel; allowing further
+    /// allocations would let the admin pre-empt that cancel.
+    DeadlinePassed = 22,
 }
