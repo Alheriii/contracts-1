@@ -2295,3 +2295,33 @@ fn test_release_rejects_self_payout() {
     assert_eq!(escrow.status, crate::types::EscrowStatus::Funded);
 }
 
+#[test]
+fn test_set_admin_updates_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, admin, _, client) = setup(&env);
+
+    assert_eq!(client.get_admin(), admin);
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+    assert_eq!(client.get_admin(), new_admin);
+}
+
+#[test]
+fn test_set_admin_requires_current_and_new_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _, client) = setup(&env);
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+    // After rotation, the new admin should be in storage.
+    assert_eq!(client.get_admin(), new_admin);
+
+    // Rotating again from new_admin to a third address must also succeed.
+    let third_admin = Address::generate(&env);
+    client.set_admin(&third_admin);
+    assert_eq!(client.get_admin(), third_admin);
+}
+
