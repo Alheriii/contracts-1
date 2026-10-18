@@ -324,6 +324,9 @@ fn set_admin(env, new_admin: Address) -> Result<(), Error>;
 fn set_oracle(env, new_oracle: Address) -> Result<(), Error>;
 fn recover_admin(env, new_admin: Address) -> Result<(), Error>;
 fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
+fn recover_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
+fn is_paused_view(env) -> bool;
 ```
 
 - `pool_id` is an off-chain-assigned identifier for a repo or org (e.g. a
@@ -339,6 +342,14 @@ fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
   merge the way escrow/milestones are; it's off-chain-adjudicated
   "maintenance credit"). Deducts the fee, rejects if `amount` exceeds the
   pool's current balance (`InsufficientBalance`).
+- `recover_admin`: recovery-address-only — if a `recovery` address was
+  supplied at `initialize`, that address may appoint a new admin. Covers
+  the "admin key permanently lost" scenario without requiring an upgrade.
+- `set_treasury`: admin-only — updates the treasury address that receives
+  the protocol fee on each `withdraw` call.
+- `is_paused_view`: read-only — returns `true` when the contract is
+  paused (i.e. `pause` has been called and `unpause` has not). Unlike
+  `pause`/`unpause` this does not require admin authorization.
 
 ## Data models
 
