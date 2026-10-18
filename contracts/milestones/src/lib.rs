@@ -121,6 +121,14 @@ mod contract {
             return Err(Error::InvalidAmount);
         }
 
+        // Reject a deadline that is already in the past: cancel_milestone_after_deadline
+        // becomes callable by anyone as soon as deadline + GRACE_PERIOD elapses, so a
+        // stale / zero deadline makes that permissionless path immediately reachable
+        // (issue #491 — same gap as escrow's issue #21).
+        if deadline <= env.ledger().timestamp() {
+            return Err(Error::DeadlineInPast);
+        }
+
         let key = DataKey::Milestone(milestone_id);
         if let Some(existing) = env.storage().persistent().get::<_, Milestone>(&key) {
             if !existing.closed {
