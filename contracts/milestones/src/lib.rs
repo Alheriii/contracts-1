@@ -338,6 +338,17 @@ mod contract {
         if milestone.closed {
             return Err(Error::MilestoneClosed);
         }
+
+        // Reject allocations once the milestone's deadline has passed (#489).
+        // Once `now >= deadline` sponsors can trigger `cancel_milestone_after_deadline`
+        // after the grace period; allowing allocations beyond the deadline lets the
+        // admin pre-empt that cancel by moving remaining_budget into allocations that
+        // the permissionless cancel cannot sweep.
+        let now = env.ledger().timestamp();
+        if now >= milestone.deadline {
+            return Err(Error::DeadlinePassed);
+        }
+
         if milestone.allocations.contains_key(issue_id) {
             return Err(Error::IssueAlreadyAllocated);
         }

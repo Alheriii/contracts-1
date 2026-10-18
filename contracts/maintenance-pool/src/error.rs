@@ -34,4 +34,8 @@ pub enum Error {
     /// `total_deposited` near `i128::MAX`). Returned instead of panicking
     /// under release `overflow-checks = true` + `panic = "abort"`.
     ArithmeticOverflow = 16,
+    /// Recipient basis-point weights do not sum to 10 000 (#484).
+    InvalidSplit = 17,
+    /// A recipient address equals the contract address — self-payout (#484).
+    SelfPayout = 18,
 }

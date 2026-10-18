@@ -16,7 +16,7 @@ mod types;
 mod test;
 
 use error::Error;
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Vec};
 use types::{DataKey, Deposit, MaintenancePool};
 
 use mergefi_common::BPS_DENOMINATOR;
@@ -178,11 +178,17 @@ mod contract {
         Ok(())
     }
 
-    /// Admin-only: pays `amount` (minus the protocol fee) out of the pool
-    /// to `recipient` (a maintainer), as authorized off-chain by the
-    /// backend oracle for completed maintenance work. Rejects if the pool
-    /// balance is insufficient.
-    pub fn withdraw(env: Env, pool_id: u64, recipient: Address, amount: i128) -> Result<(), Error> {
+    /// Oracle-authorized: pays `amount` out of the pool, split across
+    /// `recipients` (basis-points weights summing to 10 000) after
+    /// deducting the protocol fee via `mergefi_common::compute_split`
+    /// — the same path escrow and milestones use (#483, #484).
+    /// Rejects if the pool balance is insufficient.
+    pub fn withdraw(
+        env: Env,
+        pool_id: u64,
+        recipients: Vec<(Address, u32)>,
+        amount: i128,
+    ) -> Result<(), Error> {
         if is_paused(&env) {
             return Err(Error::ContractPaused);
         }
@@ -206,13 +212,14 @@ mod contract {
 
         let fee_bps: u32 = mergefi_common::get_fee_bps::<DataKey>(&env)
             .ok_or(Error::NotInitialized)?;
-        let fee = amount
-            .checked_mul(fee_bps as i128)
-            .ok_or(Error::ArithmeticOverflow)?
-            / BPS_DENOMINATOR;
-        let payout = amount
-            .checked_sub(fee)
-            .ok_or(Error::ArithmeticOverflow)?;
+        let payouts =
+            mergefi_common::compute_split(&env, amount, fee_bps, &recipients).map_err(
+                |e| match e {
+                    mergefi_common::SplitError::InvalidSplit => Error::InvalidSplit,
+                    mergefi_common::SplitError::SelfPayout => Error::SelfPayout,
+                    mergefi_common::SplitError::Overflow => Error::ArithmeticOverflow,
+                },
+            )?;
 
         let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env)
             .ok_or(Error::NotInitialized)?;
@@ -231,10 +238,14 @@ mod contract {
         env.storage().persistent().set(&pkey, &pool);
         extend_ttl(&env, &pkey);
 
-        if fee > 0 {
-            token_client.transfer(&contract_address, &treasury, &fee);
+        if payouts.fee > 0 {
+            token_client.transfer(&contract_address, &treasury, &payouts.fee);
         }
-        token_client.transfer(&contract_address, &recipient, &payout);
+        for (recipient, share) in payouts.shares.iter() {
+            if share > 0 {
+                token_client.transfer(&contract_address, &recipient, &share);
+            }
+        }
 
         // Refresh all deposit sub-records on every withdrawal so historical
         // deposit records stay queryable across a long-running pool's lifetime.
