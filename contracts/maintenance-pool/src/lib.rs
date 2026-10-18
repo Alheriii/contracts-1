@@ -388,6 +388,13 @@ mod contract {
             .get(&pkey)
             .ok_or(Error::PoolNotFound)?;
 
+        // Sweeping surplus back to the contract itself is a no-op at best and
+        // an accounting error at worst; reject it the same way initialize
+        // rejects treasury == contract (issue #329).
+        if recipient == env.current_contract_address() {
+            return Err(Error::InvalidTreasury);
+        }
+
         // Verify the token matches the pool's token to avoid sweeping from
         // wrong pools or accidental token address mistakes.
         if pool.token != token {
