@@ -41,4 +41,6 @@ pub enum Error {
     /// (#489). Once past the deadline, sponsors may cancel; allowing further
     /// allocations would let the admin pre-empt that cancel.
     DeadlinePassed = 22,
+    /// The deadline supplied to `create_milestone` is in the past (issue #491).
+    DeadlineInPast = 22,
 }
