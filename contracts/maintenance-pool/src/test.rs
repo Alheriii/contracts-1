@@ -1065,6 +1065,11 @@ fn test_reclaim_deposit_requires_sponsor_auth() {
 
 #[test]
 fn test_sweep_rejects_contract_as_recipient() {
+#[test]
+fn test_reclaim_deposit_second_call_rejected_with_already_reclaimed() {
+    // Regression for #479: reclaim_deposit must mark the deposit as reclaimed
+    // so a second call on the same index is rejected rather than draining other
+    // sponsors' funds.
     let env = Env::default();
     env.mock_all_auths();
     let (_admin, _treasury, client) = setup(&env);
@@ -1129,6 +1134,24 @@ fn test_set_admin_requires_new_admin_auth() {
 
 #[test]
 fn test_withdraw_rejects_zero_amount() {
+    asset_client.mint(&sponsor, &1_000_0000000i128);
+
+    client.deposit(&500u64, &sponsor, &token_addr, &100_0000000i128);
+
+    env.ledger().set_timestamp(INACTIVITY_WINDOW + 1);
+
+    // First reclaim must succeed and transfer the deposit amount.
+    client.reclaim_deposit(&500u64, &0u32, &sponsor);
+    assert_eq!(token_client.balance(&sponsor), 1_000_0000000i128);
+
+    // Second reclaim on the same index must be rejected.
+    let err = client.try_reclaim_deposit(&500u64, &0u32, &sponsor);
+    assert_eq!(err, Err(Ok(Error::AlreadyReclaimed)));
+}
+
+#[test]
+fn test_keep_alive_succeeds_on_existing_pool() {
+    // Regression for #476: keep_alive must not error on a valid pool.
     let env = Env::default();
     env.mock_all_auths();
     let (_admin, _treasury, client) = setup(&env);
@@ -1146,6 +1169,18 @@ fn test_withdraw_rejects_zero_amount() {
 
 #[test]
 fn test_withdraw_rejects_negative_amount() {
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &100_0000000i128);
+    client.deposit(&600u64, &sponsor, &token_addr, &100_0000000i128);
+
+    // keep_alive is permissionless and must return Ok(()).
+    client.keep_alive(&600u64);
+}
+
+#[test]
+fn test_keep_alive_fails_on_nonexistent_pool() {
+    // Regression for #476: keep_alive on an unknown pool_id must return PoolNotFound.
     let env = Env::default();
     env.mock_all_auths();
     let (_admin, _treasury, client) = setup(&env);
@@ -1190,4 +1225,6 @@ fn test_initialize_rejects_max_fee_bps() {
     // fee_bps == 10_001 (> BPS_DENOMINATOR 10_000) should fail.
     let err = client.try_initialize(&admin, &oracle, &treasury, &10_001u32, &None);
     assert_eq!(err, Err(Ok(Error::InvalidFee)));
+    let err = client.try_keep_alive(&9999u64);
+    assert_eq!(err, Err(Ok(Error::PoolNotFound)));
 }

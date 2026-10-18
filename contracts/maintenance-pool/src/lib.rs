@@ -214,7 +214,8 @@ mod contract {
             .checked_sub(fee)
             .ok_or(Error::ArithmeticOverflow)?;
 
-        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env).unwrap();
+        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env)
+            .ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &pool.token);
         let contract_address = env.current_contract_address();
 
@@ -299,16 +300,39 @@ mod contract {
             return Err(Error::InactivityWindowNotElapsed);
         }
 
+        // Reject a second reclaim before any other check so we never
+        // transfer from a zeroed record (#479).
+        if deposit.amount == 0 {
+            return Err(Error::AlreadyReclaimed);
+        }
+
         if deposit.amount > pool.balance {
             return Err(Error::InsufficientBalance);
         }
 
+        let transfer_amount = deposit.amount;
+
+        // Zero the deposit record **before** the transfer so a re-entrant or
+        // repeated call cannot drain other sponsors' funds (#479).
+        let mut zeroed = deposit.clone();
+        zeroed.amount = 0;
+        env.storage().persistent().set(&dkey, &zeroed);
+
         let token_client = token::Client::new(&env, &pool.token);
-        token_client.transfer(&env.current_contract_address(), &sponsor, &deposit.amount);
+        token_client.transfer(&env.current_contract_address(), &sponsor, &transfer_amount);
 
         pool.balance = pool
             .balance
-            .checked_sub(deposit.amount)
+            .checked_sub(transfer_amount)
+            .ok_or(Error::ArithmeticOverflow)?;
+        // A reclaim is a capital outflow and must be tracked the same way as a
+        // normal withdrawal, so that get_pool and any off-chain accounting that
+        // reads total_withdrawn always reflects the full amount that left the
+        // pool. Without this update, reclaimed funds appear as "still in" the
+        // pool, breaking balance invariants. (#485)
+        pool.total_withdrawn = pool
+            .total_withdrawn
+            .checked_add(deposit.amount)
             .ok_or(Error::ArithmeticOverflow)?;
         env.storage().persistent().set(&pkey, &pool);
         extend_ttl(&env, &pkey);
