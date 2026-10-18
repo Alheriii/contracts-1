@@ -1913,6 +1913,32 @@ fn test_release_issue_with_admin_as_recipient() {
     assert_eq!(token_client.balance(&admin), distributable);
 }
 
+#[test]
+fn test_keep_alive_succeeds_on_existing_milestone() {
+    // Regression for #475: milestones::keep_alive must not error on a valid milestone.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &100_0000000i128);
+    client.create_milestone(&700u64, &sponsor, &token_addr, &100_0000000i128, &9999u64);
+
+    // keep_alive is permissionless and must return Ok(()).
+    client.keep_alive(&700u64);
+}
+
+#[test]
+fn test_keep_alive_fails_on_nonexistent_milestone() {
+    // Regression for #475: keep_alive on an unknown milestone_id must return MilestoneNotFound.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    let err = client.try_keep_alive(&9999u64);
+    assert_eq!(err, Err(Ok(Error::MilestoneNotFound)));
 // ── Regression: issue #491 ────────────────────────────────────────────────────
 
 #[test]
