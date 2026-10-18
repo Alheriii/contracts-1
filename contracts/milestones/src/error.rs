@@ -37,4 +37,6 @@ pub enum Error {
     /// `i128::MAX`). Returned instead of panicking under release
     /// `overflow-checks = true` + `panic = "abort"`.
     ArithmeticOverflow = 21,
+    /// The deadline supplied to `create_milestone` is in the past (issue #491).
+    DeadlineInPast = 22,
 }
