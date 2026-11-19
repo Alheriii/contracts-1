@@ -203,6 +203,8 @@ mod contract {
     #[contractevent]
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct FeeBpsChanged {
+        #[topic]
+        pub admin: Address,
         pub old_fee_bps: u32,
         pub new_fee_bps: u32,
     }
@@ -1190,7 +1192,8 @@ mod contract {
         /// The change is limited to 5% (500 basis points) per call to prevent
         /// accidental or malicious fee spikes.
         pub fn set_fee_bps(env: Env, new_fee_bps: u32) -> Result<(), Error> {
-            require_admin(&env)?.require_auth();
+            let admin = require_admin(&env)?;
+            admin.require_auth();
 
             let current_fee: u32 =
                 mergefi_common::get_fee_bps::<DataKey>(&env).ok_or(Error::NotInitialized)?;
@@ -1201,6 +1204,7 @@ mod contract {
             env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
             extend_instance_ttl(&env);
             FeeBpsChanged {
+                admin,
                 old_fee_bps: current_fee,
                 new_fee_bps,
             }

@@ -263,6 +263,7 @@ fn test_milestone_lifecycle_and_admin_events() {
         &env,
         &contract_id,
         FeeBpsChanged {
+            admin: recovered_admin.clone(),
             old_fee_bps: 500,
             new_fee_bps: 750,
         },

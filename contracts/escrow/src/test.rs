@@ -365,6 +365,7 @@ fn test_administrative_actions_emit_events() {
         &env,
         &contract_id,
         FeeBpsChanged {
+            admin: recovered_admin.clone(),
             old_fee_bps: 500,
             new_fee_bps: 1_000,
         },
