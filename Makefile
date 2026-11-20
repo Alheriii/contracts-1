@@ -59,38 +59,53 @@ fmt:
 clean:
 	cargo clean
 
+DEPLOYMENTS_DIR := deployments
+
 ## Example deploy targets. Requires `stellar` (formerly `soroban`) CLI and a
 ## funded identity named $(SOURCE_ACCOUNT) (see: stellar keys generate).
 ## Supply ADMIN, ORACLE, TREASURY, and FEE_BPS to deploy and initialize each
 ## contract. Example: make deploy-escrow ADMIN=G... ORACLE=G... TREASURY=G... FEE_BPS=250
+##
+## Each target writes the contract address and wasm hash as JSON to
+## deployments/<network>/<contract>.json so downstream tools never have to
+## scrape stdout.
 deploy-escrow: build
 	@test -n "$(ADMIN)" -a -n "$(ORACLE)" -a -n "$(TREASURY)" -a -n "$(FEE_BPS)" || { echo "Set ADMIN, ORACLE, TREASURY, and FEE_BPS"; exit 1; }
+	@mkdir -p $(DEPLOYMENTS_DIR)/$(NETWORK)
 	@set -e; \
 	contract_id=$$(stellar contract deploy --wasm $(WASM_DIR)/mergefi_escrow.wasm --source $(SOURCE_ACCOUNT) --network $(NETWORK)); \
 	echo "Initializing escrow at $$contract_id"; \
 	stellar contract invoke --id "$$contract_id" --source $(SOURCE_ACCOUNT) --network $(NETWORK) -- initialize \
 		--admin "$(ADMIN)" --oracle "$(ORACLE)" --treasury "$(TREASURY)" --fee_bps "$(FEE_BPS)" \
 		--max_sponsors none --recovery none; \
-	echo "Escrow initialized at $$contract_id"
+	echo "{\"contractName\":\"mergefi-escrow\",\"contractAddress\":\"$$contract_id\",\"network\":\"$(NETWORK)\"}" \
+		> $(DEPLOYMENTS_DIR)/$(NETWORK)/mergefi-escrow.json; \
+	echo "Escrow deployed and record written to $(DEPLOYMENTS_DIR)/$(NETWORK)/mergefi-escrow.json"
 
 deploy-milestones: build
 	@test -n "$(ADMIN)" -a -n "$(ORACLE)" -a -n "$(TREASURY)" -a -n "$(FEE_BPS)" || { echo "Set ADMIN, ORACLE, TREASURY, and FEE_BPS"; exit 1; }
+	@mkdir -p $(DEPLOYMENTS_DIR)/$(NETWORK)
 	@set -e; \
 	contract_id=$$(stellar contract deploy --wasm $(WASM_DIR)/mergefi_milestones.wasm --source $(SOURCE_ACCOUNT) --network $(NETWORK)); \
 	echo "Initializing milestones at $$contract_id"; \
 	stellar contract invoke --id "$$contract_id" --source $(SOURCE_ACCOUNT) --network $(NETWORK) -- initialize \
 		--admin "$(ADMIN)" --oracle "$(ORACLE)" --treasury "$(TREASURY)" --fee_bps "$(FEE_BPS)" \
 		--max_sponsors none --recovery none; \
-	echo "Milestones initialized at $$contract_id"
+	echo "{\"contractName\":\"mergefi-milestones\",\"contractAddress\":\"$$contract_id\",\"network\":\"$(NETWORK)\"}" \
+		> $(DEPLOYMENTS_DIR)/$(NETWORK)/mergefi-milestones.json; \
+	echo "Milestones deployed and record written to $(DEPLOYMENTS_DIR)/$(NETWORK)/mergefi-milestones.json"
 
 deploy-maintenance-pool: build
 	@test -n "$(ADMIN)" -a -n "$(ORACLE)" -a -n "$(TREASURY)" -a -n "$(FEE_BPS)" || { echo "Set ADMIN, ORACLE, TREASURY, and FEE_BPS"; exit 1; }
+	@mkdir -p $(DEPLOYMENTS_DIR)/$(NETWORK)
 	@set -e; \
 	contract_id=$$(stellar contract deploy --wasm $(WASM_DIR)/mergefi_maintenance_pool.wasm --source $(SOURCE_ACCOUNT) --network $(NETWORK)); \
 	echo "Initializing maintenance pool at $$contract_id"; \
 	stellar contract invoke --id "$$contract_id" --source $(SOURCE_ACCOUNT) --network $(NETWORK) -- initialize \
 		--admin "$(ADMIN)" --oracle "$(ORACLE)" --treasury "$(TREASURY)" --fee_bps "$(FEE_BPS)" \
 		--recovery none; \
-	echo "Maintenance pool initialized at $$contract_id"
+	echo "{\"contractName\":\"mergefi-maintenance-pool\",\"contractAddress\":\"$$contract_id\",\"network\":\"$(NETWORK)\"}" \
+		> $(DEPLOYMENTS_DIR)/$(NETWORK)/mergefi-maintenance-pool.json; \
+	echo "Maintenance pool deployed and record written to $(DEPLOYMENTS_DIR)/$(NETWORK)/mergefi-maintenance-pool.json"
 
 deploy: deploy-escrow deploy-milestones deploy-maintenance-pool
