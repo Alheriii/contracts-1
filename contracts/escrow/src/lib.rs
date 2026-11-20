@@ -687,9 +687,8 @@ mod contract {
             caller: Address,
             new_deadline: u64,
         ) -> Result<(), Error> {
-            if is_paused(&env) {
-                return Err(Error::ContractPaused);
-            }
+            // Intentionally not pause-gated: extending a deadline cannot move funds,
+            // it only delays a refund, and the grace period keeps elapsing while paused.
 
             caller.require_auth();
 
@@ -866,10 +865,7 @@ mod contract {
 
         /// Check if the contract is paused.
         pub fn is_paused_view(env: Env) -> bool {
-            env.storage()
-                .instance()
-                .get(&DataKey::Paused)
-                .unwrap_or(false)
+            is_paused(&env)
         }
 
         /// Rotate the admin key. Requires current admin's authorization.

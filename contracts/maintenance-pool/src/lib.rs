@@ -710,10 +710,7 @@ mod contract {
 
         /// Returns whether the contract is currently paused.
         pub fn is_paused_view(env: Env) -> bool {
-            env.storage()
-                .instance()
-                .get(&DataKey::Paused)
-                .unwrap_or(false)
+            is_paused(&env)
         }
 
     /// Upgrade the contract's wasm code. Requires admin authorization.
