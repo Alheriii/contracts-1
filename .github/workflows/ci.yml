@@ -94,6 +94,31 @@ jobs:
       - name: Generate TypeScript contract bindings
         run: make bindings
 
+      - name: Assert optimized wasm does not change the contract spec
+        run: |
+          set -euo pipefail
+          CONTRACTS="mergefi-escrow mergefi-milestones mergefi-maintenance-pool"
+          WASM_DIR="target/wasm32v1-none/release"
+          SCRATCH=$(mktemp -d)
+          for c in $CONTRACTS; do
+            snake=$(echo "$c" | tr - _)
+            unopt="${WASM_DIR}/${snake}.wasm"
+            opt="${WASM_DIR}/${snake}.optimized.wasm"
+            name=$(echo "$c" | sed 's/^mergefi-//')
+            # Generate bindings from the unoptimized wasm into a scratch dir
+            stellar contract bindings typescript \
+              --wasm "$unopt" \
+              --output-dir "${SCRATCH}/unopt-${name}" \
+              --overwrite
+            # Diff against the bindings already generated from the optimized wasm
+            if ! diff -rq "${SCRATCH}/unopt-${name}" "bindings/mergefi-${name}"; then
+              echo "ERROR: stellar contract bindings output differs between ${snake}.wasm and ${snake}.optimized.wasm"
+              echo "The optimizer changed the contract spec; check contracts/${c}/src/lib.rs"
+              exit 1
+            fi
+          done
+          rm -rf "$SCRATCH"
+
       - name: Upload TypeScript bindings
         uses: actions/upload-artifact@v4
         with:
