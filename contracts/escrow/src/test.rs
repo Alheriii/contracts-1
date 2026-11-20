@@ -1925,9 +1925,6 @@ fn test_pause_blocks_mutating_entrypoints_but_allows_expired_refund() {
     let err = client.try_contribute(&300u64, &sponsor, &1_000i128);
     assert_eq!(err, Err(Ok(Error::ContractPaused)));
 
-    let err = client.try_extend_deadline(&300u64, &sponsor, &500u64);
-    assert_eq!(err, Err(Ok(Error::ContractPaused)));
-
     let err = client.try_release(&300u64, &vec![&env, (contributor, 10_000u32)]);
     assert_eq!(err, Err(Ok(Error::ContractPaused)));
 
@@ -3349,6 +3346,7 @@ fn test_set_admin_requires_current_and_new_admin_auth() {
 }
 
 #[test]
+fn test_extend_deadline_allowed_while_paused() {
 fn test_keep_alive_rejects_terminal_escrows() {
 fn test_fund_rejects_deadline_not_in_the_future() {
     let env = Env::default();
@@ -3358,6 +3356,14 @@ fn test_fund_rejects_deadline_not_in_the_future() {
     let token_admin = Address::generate(&env);
     let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
     let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    env.ledger().set_timestamp(100);
+    client.fund(&310u64, &sponsor, &token_addr, &10_000i128, &200u64, &None);
+    client.pause();
+
+    client.extend_deadline(&310u64, &sponsor, &500u64);
+    assert_eq!(client.get_escrow(&310u64).deadline, 500u64);
     let contributor = Address::generate(&env);
     asset_client.mint(&sponsor, &10_000i128);
 
