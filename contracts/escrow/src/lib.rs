@@ -313,6 +313,9 @@ mod contract {
                     return Err(Error::InvalidTarget);
                 }
             }
+            if deadline <= env.ledger().timestamp() {
+                return Err(Error::InvalidDeadline);
+            }
 
             let key = DataKey::Escrow(issue_id);
             if let Some(existing) = env.storage().persistent().get::<_, Escrow>(&key) {

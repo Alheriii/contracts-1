@@ -2407,14 +2407,14 @@ fn test_fund_allows_reuse_after_refund() {
         &sponsor,
         &token_addr,
         &5_000_000_000i128,
-        &500u64,
+        &(500u64 + crate::GRACE_PERIOD),
         &None,
     );
 
     let escrow = client.get_escrow(&600u64);
     assert_eq!(escrow.status, EscrowStatus::Funded);
     assert_eq!(escrow.amount, 5_000_000_000i128);
-    assert_eq!(escrow.deadline, 500u64);
+    assert_eq!(escrow.deadline, 500u64 + crate::GRACE_PERIOD);
     assert_eq!(escrow.contributor_count, 1);
 }
 
@@ -3350,6 +3350,7 @@ fn test_set_admin_requires_current_and_new_admin_auth() {
 
 #[test]
 fn test_keep_alive_rejects_terminal_escrows() {
+fn test_fund_rejects_deadline_not_in_the_future() {
     let env = Env::default();
     env.mock_all_auths();
     let (_, _admin, _treasury, client) = setup(&env);
@@ -3383,4 +3384,14 @@ fn test_get_contribution_rejects_index_beyond_contributor_count() {
         client.try_get_contribution(&321u64, &1u32),
         Err(Ok(Error::ContributionNotFound))
     );
+    asset_client.mint(&sponsor, &10_000i128);
+
+    env.ledger().set_timestamp(100);
+    let err = client.try_fund(&330u64, &sponsor, &token_addr, &1_000i128, &0u64, &None);
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+    let err = client.try_fund(&330u64, &sponsor, &token_addr, &1_000i128, &100u64, &None);
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+    assert!(client
+        .try_fund(&330u64, &sponsor, &token_addr, &1_000i128, &101u64, &None)
+        .is_ok());
 }
