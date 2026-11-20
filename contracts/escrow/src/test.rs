@@ -3347,3 +3347,40 @@ fn test_set_admin_requires_current_and_new_admin_auth() {
     client.set_admin(&third_admin);
     assert_eq!(client.get_admin(), third_admin);
 }
+
+#[test]
+fn test_keep_alive_rejects_terminal_escrows() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    client.fund(&320u64, &sponsor, &token_addr, &10_000i128, &1_000u64, &None);
+    client.release(&320u64, &vec![&env, (contributor, 10_000u32)]);
+
+    assert_eq!(client.try_keep_alive(&320u64), Err(Ok(Error::AlreadyPaid)));
+}
+
+#[test]
+fn test_get_contribution_rejects_index_beyond_contributor_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    client.fund(&321u64, &sponsor, &token_addr, &10_000i128, &1_000u64, &None);
+    assert!(client.try_get_contribution(&321u64, &0u32).is_ok());
+    assert_eq!(
+        client.try_get_contribution(&321u64, &1u32),
+        Err(Ok(Error::ContributionNotFound))
+    );
+}

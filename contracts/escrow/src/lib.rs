@@ -778,6 +778,13 @@ mod contract {
                 .get(&key)
                 .ok_or(Error::EscrowNotFound)?;
 
+            // Terminal records need no liveness guarantee.
+            match escrow.status {
+                EscrowStatus::Paid => return Err(Error::AlreadyPaid),
+                EscrowStatus::Refunded => return Err(Error::AlreadyRefunded),
+                EscrowStatus::Funded => {}
+            }
+
             let target = escrow.deadline.saturating_add(GRACE_PERIOD);
             extend_ttl_for_target(&env, &key, target);
 
@@ -809,6 +816,16 @@ mod contract {
             issue_id: u64,
             index: u32,
         ) -> Result<Contribution, Error> {
+            // Records past `contributor_count` are leftovers from a previous
+            // funding round and must not be readable as live contributions.
+            let escrow: Escrow = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Escrow(issue_id))
+                .ok_or(Error::EscrowNotFound)?;
+            if index >= escrow.contributor_count {
+                return Err(Error::ContributionNotFound);
+            }
             env.storage()
                 .persistent()
                 .get(&DataKey::Contribution(issue_id, index))
