@@ -127,6 +127,13 @@ mod contract {
 
     #[contractevent]
     #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct EscrowKeptAlive {
+        #[topic]
+        pub issue_id: u64,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct ContractPaused {
         #[topic]
         pub admin: Address,
@@ -796,6 +803,8 @@ mod contract {
                 let contribution_key = DataKey::Contribution(issue_id, i);
                 extend_ttl_for_target(&env, &contribution_key, target);
             }
+
+            EscrowKeptAlive { issue_id }.publish(&env);
 
             Ok(())
         }
