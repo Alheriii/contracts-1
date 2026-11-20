@@ -2167,6 +2167,7 @@ fn test_keep_alive_refreshes_ttl_without_changing_deadline_or_status() {
     // Anyone can call this — no auth mocked out or required for it, unlike
     // extend_deadline's contributor-only require_auth.
     client.keep_alive(&304u64);
+    assert_event(&env, &contract_id, EscrowKeptAlive { issue_id: 304 });
 
     let after = client.get_escrow(&304u64);
     assert_eq!(
