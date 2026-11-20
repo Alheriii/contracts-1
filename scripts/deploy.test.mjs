@@ -31,3 +31,17 @@ describe("scripts/deploy.mjs CLI argument validation", () => {
     }
   });
 });
+
+describe("scripts/deploy.mjs stdout / stderr separation", () => {
+  test("usage hint goes to stderr and stdout is empty", async () => {
+    try {
+      await execFileAsync("node", ["scripts/deploy.mjs"], {
+        env: { ...process.env, DEPLOYER_SECRET: "" },
+      });
+      assert.fail("Expected process to exit with non-zero code");
+    } catch (err) {
+      assert.match(err.stderr, /Usage:/);
+      assert.strictEqual(err.stdout, "");
+    }
+  });
+});
