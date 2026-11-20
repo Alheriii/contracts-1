@@ -2,6 +2,10 @@
  * Error code mappings for Soroban contracts.
  * Hand-maintained alongside contracts/*/src/error.rs — keep in sync.
  * Run `node --test scripts/error-codes.test.mjs` to verify parity (#858).
+ * Generated from contract error.rs files.
+ *
+ * Tests: scripts/error-codes.test.mjs (#855)
+ * Run:   node --test scripts/error-codes.test.mjs
  */
 
 export const errorMappings = {

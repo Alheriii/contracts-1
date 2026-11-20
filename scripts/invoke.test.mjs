@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Address, nativeToScVal } from "@stellar/stellar-sdk";
-import { parseArg } from "./invoke.mjs";
+import { parseArg, VIEW_METHODS } from "./invoke.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +17,30 @@ describe("scripts/invoke.mjs CLI argument validation", () => {
     } catch (err) {
       assert.strictEqual(err.code, 1);
       assert.match(err.stderr, /Usage: INVOKER_SECRET=S/);
+    }
+  });
+
+  test("usage message mentions --simulate when no secret provided but contract+method given", async () => {
+    try {
+      await execFileAsync("node", ["scripts/invoke.mjs", "CABC123", "some_method"], {
+        env: { ...process.env, INVOKER_SECRET: "", DEPLOYER_SECRET: "" },
+      });
+      assert.fail("Expected process to exit with non-zero code");
+    } catch (err) {
+      assert.strictEqual(err.code, 1);
+      assert.match(err.stderr, /--simulate/);
+    }
+  });
+
+  test("--simulate without contract and method still exits 1", async () => {
+    try {
+      await execFileAsync("node", ["scripts/invoke.mjs", "--simulate"], {
+        env: { ...process.env, INVOKER_SECRET: "", DEPLOYER_SECRET: "" },
+      });
+      assert.fail("Expected process to exit with non-zero code");
+    } catch (err) {
+      assert.strictEqual(err.code, 1);
+      assert.match(err.stderr, /Usage/);
     }
   });
 
@@ -126,5 +150,24 @@ describe("scripts/invoke.mjs parseArg unit tests", () => {
       () => parseArg("invalid_type:123"),
       /Unknown arg type: invalid_type/
     );
+  });
+});
+
+describe("scripts/invoke.mjs VIEW_METHODS (#853)", () => {
+  test("VIEW_METHODS is a Set", () => {
+    assert.ok(VIEW_METHODS instanceof Set);
+    assert.ok(VIEW_METHODS.size > 0);
+  });
+
+  test("known read-only methods are in VIEW_METHODS", () => {
+    for (const m of ["is_paused", "version", "get_escrow", "get_bounty", "owner"]) {
+      assert.ok(VIEW_METHODS.has(m), `expected VIEW_METHODS to contain '${m}'`);
+    }
+  });
+
+  test("write methods are not in VIEW_METHODS", () => {
+    for (const m of ["initialize", "deposit", "approve_work", "claim"]) {
+      assert.ok(!VIEW_METHODS.has(m), `VIEW_METHODS should not contain write method '${m}'`);
+    }
   });
 });
