@@ -65,20 +65,99 @@ export function parseArg(raw) {
   throw new Error(`Unknown arg type: ${type}`);
 }
 
-async function main() {
-  const secret = process.env.INVOKER_SECRET || process.env.DEPLOYER_SECRET;
-  const [, , contractId, method, ...args] = process.argv;
+// Well-known read-only view methods that never need a signer.  Passing
+// --simulate is always explicit; this list lets the script auto-infer it
+// when the caller omits the flag but the method is obviously a read.
+export const VIEW_METHODS = new Set([
+  "is_paused",
+  "version",
+  "get_escrow",
+  "get_bounty",
+  "get_config",
+  "get_recipient",
+  "get_recipients",
+  "total_bounties",
+  "owner",
+]);
 
-  if (!secret || !contractId || !method) {
+/** Decode a simulation return value to a human-readable string. */
+function formatRetval(retval) {
+  if (!retval) return "(void)";
+  try {
+    const { scValToNative } = await import("@stellar/stellar-sdk");
+    return JSON.stringify(scValToNative(retval));
+  } catch {
+    return retval.toXDR("base64");
+  }
+}
+
+async function main() {
+  const rawArgv = process.argv.slice(2);
+
+  // --simulate flag: stop after simulateTransaction, no signing key required.
+  const simulateIdx = rawArgv.indexOf("--simulate");
+  const explicitSimulate = simulateIdx !== -1;
+  const positional = explicitSimulate
+    ? rawArgv.filter((_, i) => i !== simulateIdx)
+    : rawArgv;
+
+  const [contractId, method, ...args] = positional;
+
+  const simulateMode = explicitSimulate || VIEW_METHODS.has(method);
+
+  const secret = process.env.INVOKER_SECRET || process.env.DEPLOYER_SECRET;
+
+  if (!contractId || !method) {
     console.error("Usage: INVOKER_SECRET=S... node invoke.mjs <contractId> <method> [args...]");
-    console.error("   or: DEPLOYER_SECRET=S... node invoke.mjs <contractId> <method> [args...]");
+    console.error("   or: node invoke.mjs --simulate <contractId> <method> [args...]");
     process.exitCode = 1;
     return;
   }
 
-  const kp = Keypair.fromSecret(secret);
+  if (!simulateMode && !secret) {
+    console.error("Usage: INVOKER_SECRET=S... node invoke.mjs <contractId> <method> [args...]");
+    console.error("   or: DEPLOYER_SECRET=S... node invoke.mjs <contractId> <method> [args...]");
+    console.error("   or: node invoke.mjs --simulate <contractId> <method> [args...]");
+    process.exitCode = 1;
+    return;
+  }
+
   const contract = new Contract(contractId);
   const scArgs = args.map(parseArg);
+
+  if (simulateMode) {
+    // Simulation only: build a transaction from a throwaway keypair so the RPC
+    // has a valid source account without needing a funded signer.
+    const throwaway = Keypair.random();
+    const account = new rpc.Account(throwaway.publicKey(), "0");
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(contract.call(method, ...scArgs))
+      .setTimeout(60)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+    if (rpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    if (rpc.Api.isSimulationRestore(sim)) {
+      throw new Error("Simulation requires ledger entry restore; run without --simulate to submit.");
+    }
+
+    const retval = sim.result?.retval;
+    console.log(`${method} (simulated):`, retval ? retval.toXDR("base64") : "(void)");
+    try {
+      const { scValToNative } = await import("@stellar/stellar-sdk");
+      console.log("decoded:", JSON.stringify(scValToNative(retval), null, 2));
+    } catch {
+      // scValToNative unavailable or type not decodable — raw XDR already printed above
+    }
+    return;
+  }
+
+  const kp = Keypair.fromSecret(secret);
   const account = await server.getAccount(kp.publicKey());
   const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
