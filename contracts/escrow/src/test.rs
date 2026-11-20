@@ -2407,14 +2407,14 @@ fn test_fund_allows_reuse_after_refund() {
         &sponsor,
         &token_addr,
         &5_000_000_000i128,
-        &500u64,
+        &(500u64 + crate::GRACE_PERIOD),
         &None,
     );
 
     let escrow = client.get_escrow(&600u64);
     assert_eq!(escrow.status, EscrowStatus::Funded);
     assert_eq!(escrow.amount, 5_000_000_000i128);
-    assert_eq!(escrow.deadline, 500u64);
+    assert_eq!(escrow.deadline, 500u64 + crate::GRACE_PERIOD);
     assert_eq!(escrow.contributor_count, 1);
 }
 
