@@ -1,10 +1,14 @@
 ---
 name: Bug report
-about: Report a bug in a MergeFi contract or tooling
+about: Report a bug in a MergeFi contract or tooling (non-security only)
 title: "[Bug] "
 labels: bug
 assignees: ''
 ---
+
+> **Security vulnerability?** Do not use this template.
+> Open a [private Security Advisory](https://github.com/MergeFi/contracts/security/advisories/new) instead.
+> Public issues are visible to everyone before a fix is available.
 
 ## Description
 
