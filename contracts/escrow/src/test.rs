@@ -3347,3 +3347,24 @@ fn test_set_admin_requires_current_and_new_admin_auth() {
     client.set_admin(&third_admin);
     assert_eq!(client.get_admin(), third_admin);
 }
+
+#[test]
+fn test_fund_rejects_deadline_not_in_the_future() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    env.ledger().set_timestamp(100);
+    let err = client.try_fund(&330u64, &sponsor, &token_addr, &1_000i128, &0u64, &None);
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+    let err = client.try_fund(&330u64, &sponsor, &token_addr, &1_000i128, &100u64, &None);
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+    assert!(client
+        .try_fund(&330u64, &sponsor, &token_addr, &1_000i128, &101u64, &None)
+        .is_ok());
+}
