@@ -723,7 +723,7 @@ mod contract {
                     .persistent()
                     .get(&contribution_key)
                     .ok_or(Error::MilestoneNotFound)?;
-                
+
                 let deduction = to_deduct.min(contribution.remaining);
                 contribution.remaining = contribution
                     .remaining
@@ -732,7 +732,7 @@ mod contract {
                 to_deduct = to_deduct
                     .checked_sub(deduction)
                     .ok_or(Error::ArithmeticOverflow)?;
-                
+
                 env.storage()
                     .persistent()
                     .set(&contribution_key, &contribution);
@@ -1256,7 +1256,7 @@ fn refund_remaining_budget(
             .persistent()
             .get(&contribution_key)
             .ok_or(Error::MilestoneNotFound)?;
-        
+
         if contribution.remaining > 0 {
             token_client.transfer(&contract_address, &contribution.sponsor, &contribution.remaining);
             MilestoneRefundPaid {
