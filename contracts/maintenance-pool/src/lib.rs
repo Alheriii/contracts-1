@@ -174,6 +174,15 @@ mod contract {
 
     #[contractevent]
     #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct FeeBpsChanged {
+        #[topic]
+        pub admin: Address,
+        pub old_fee_bps: u32,
+        pub new_fee_bps: u32,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct ContractUpgraded {
         #[topic]
         pub admin: Address,
@@ -670,18 +679,17 @@ mod contract {
             // Compute the true surplus: anything beyond what the pool tracks as owed.
             let surplus = actual_balance.saturating_sub(pool.balance);
 
-            // If there's a surplus, transfer it to the recipient.
+            // If there's a surplus, transfer it to the recipient and emit the event.
             if surplus > 0 {
                 token_client.transfer(&contract_address, &recipient, &surplus);
+                PoolSwept {
+                    pool_id,
+                    recipient,
+                    token,
+                    amount: surplus,
+                }
+                .publish(&env);
             }
-
-            PoolSwept {
-                pool_id,
-                recipient,
-                token,
-                amount: surplus,
-            }
-            .publish(&env);
             Ok(surplus)
         }
 
@@ -885,6 +893,42 @@ mod contract {
             }
             .publish(&env);
             Ok(())
+        }
+
+        /// Admin-only: update the protocol fee basis points (#808). The fee
+        /// controls what fraction of every `withdraw` amount is redirected to
+        /// the treasury. Requires admin authorization. The new fee must not
+        /// exceed `BPS_DENOMINATOR` (10 000 bps = 100 %).
+        pub fn set_fee_bps(env: Env, new_fee_bps: u32) -> Result<(), Error> {
+            let admin = require_admin(&env)?;
+            admin.require_auth();
+            if new_fee_bps as i128 > BPS_DENOMINATOR {
+                return Err(Error::InvalidFee);
+            }
+            let old_fee_bps: u32 =
+                mergefi_common::get_fee_bps::<DataKey>(&env).ok_or(Error::NotInitialized)?;
+            env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
+            extend_instance_ttl(&env);
+            FeeBpsChanged {
+                admin,
+                old_fee_bps,
+                new_fee_bps,
+            }
+            .publish(&env);
+            Ok(())
+        }
+
+        /// Returns the creation timestamp of `pool_id` (#816). The timestamp is
+        /// recorded once when the pool is first created by `deposit` and never
+        /// changes thereafter. It is part of the `get_pool` return value but is
+        /// surfaced here as a cheap standalone accessor.
+        pub fn get_pool_created_at(env: Env, pool_id: u64) -> Result<u64, Error> {
+            let pool: MaintenancePool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Pool(pool_id))
+                .ok_or(Error::PoolNotFound)?;
+            Ok(pool.created_at)
         }
     }
 } // mod contract
