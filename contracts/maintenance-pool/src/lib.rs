@@ -67,6 +67,9 @@ mod contract {
         #[topic]
         pub pool_id: u64,
         #[topic]
+        pub sponsor: Address,
+        pub token: Address,
+        pub created_at: u64,
         pub creator: Address,
         pub token: Address,
     }
@@ -307,6 +310,19 @@ mod contract {
             }
 
             let pkey = DataKey::Pool(pool_id);
+            let is_new_pool = !env.storage().persistent().has(&pkey);
+            let mut pool: MaintenancePool = match env.storage().persistent().get(&pkey) {
+                Some(p) => p,
+                None => MaintenancePool {
+                    token: token.clone(),
+                    balance: 0,
+                    total_deposited: 0,
+                    total_withdrawn: 0,
+                    created_at: env.ledger().timestamp(),
+                    deposit_count: 0,
+                    last_withdraw_at: 0,
+                },
+            };
             let mut pool: MaintenancePool = env
                 .storage()
                 .persistent()
@@ -403,6 +419,15 @@ mod contract {
                 extend_ttl(&env, &DataKey::Deposit(pool_id, i));
             }
             extend_instance_ttl(&env);
+            if is_new_pool {
+                PoolCreated {
+                    pool_id,
+                    sponsor: sponsor.clone(),
+                    token: token.clone(),
+                    created_at: pool.created_at,
+                }
+                .publish(&env);
+            }
             PoolDeposited {
                 pool_id,
                 sponsor,
@@ -862,6 +887,9 @@ mod contract {
 
         /// Returns the `index`-th deposit recorded for `pool_id`.
         pub fn get_deposit(env: Env, pool_id: u64, index: u32) -> Result<Deposit, Error> {
+            if !env.storage().persistent().has(&DataKey::Pool(pool_id)) {
+                return Err(Error::PoolNotFound);
+            }
             env.storage()
                 .persistent()
                 .get(&DataKey::Deposit(pool_id, index))
