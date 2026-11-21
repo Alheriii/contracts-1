@@ -17,7 +17,7 @@
 
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::BPS_DENOMINATOR;
+use crate::{BPS_DENOMINATOR, MAX_RECIPIENTS};
 
 /// The computed protocol fee and each recipient's absolute payout amount.
 pub struct Payouts {
@@ -27,21 +27,37 @@ pub struct Payouts {
     pub shares: Vec<(Address, i128)>,
 }
 
-/// Error from [`compute_split`]. Deliberately small and generic — map it to
-/// whichever `InvalidSplit`-shaped variant your contract's own `Error` enum
-/// already has, e.g. `compute_split(..).map_err(|_| Error::InvalidSplit)?`.
+/// Error from [`compute_split`].
+///
+/// Each variant identifies the specific validation that failed so callers can
+/// produce a precise error message rather than a single catch-all code (#823).
+/// The old `InvalidSplit` catch-all is kept as a deprecated alias that maps to
+/// `WeightMismatch` for callers that have not yet been updated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitError {
-    /// `recipients` was empty, or its basis-point shares don't sum to
-    /// exactly `BPS_DENOMINATOR` (10000 = 100%).
-    InvalidSplit,
+    /// `recipients` list is empty — there is nobody to pay.
+    EmptyRecipients,
+    /// At least one recipient has a zero basis-point weight, which would make
+    /// their computed payout zero before rounding dust is applied.
+    ZeroWeight,
+    /// The same recipient address appears more than once in the list.
+    DuplicateRecipient,
+    /// The basis-point weights do not sum to exactly `BPS_DENOMINATOR` (10 000
+    /// = 100%).
+    WeightMismatch,
     /// A recipient address equals the contract's own address — a self-payout
     /// that would strand funds in the contract with no recovery path.
     SelfPayout,
+    /// `recipients` exceeds [`MAX_RECIPIENTS`].
+    TooManyRecipients,
     /// Checked i128 arithmetic overflowed. Returned instead of panicking
     /// (release profile sets `overflow-checks = true` + `panic = "abort"`,
     /// so an unchecked op would abort the whole transaction).
     Overflow,
+    /// Deprecated alias kept for callers that match on `InvalidSplit` and have
+    /// not yet been updated to use the specific variants above. New code should
+    /// match each variant individually.
+    InvalidSplit,
 }
 
 /// Validates that basis-point splits sum to exactly 10000 and computes the
@@ -53,7 +69,23 @@ pub fn compute_split(
     recipients: &Vec<(Address, u32)>,
 ) -> Result<Payouts, SplitError> {
     if recipients.is_empty() {
-        return Err(SplitError::InvalidSplit);
+        return Err(SplitError::EmptyRecipients);
+    }
+    if recipients.len() > MAX_RECIPIENTS {
+        return Err(SplitError::TooManyRecipients);
+    }
+
+    for i in 0..recipients.len() {
+        let (recipient, bps) = recipients.get(i).unwrap();
+        if bps == 0 {
+            return Err(SplitError::ZeroWeight);
+        }
+        for j in 0..i {
+            let (other_recipient, _) = recipients.get(j).unwrap();
+            if recipient == other_recipient {
+                return Err(SplitError::DuplicateRecipient);
+            }
+        }
     }
 
     let mut bps_sum: i128 = 0;
@@ -63,7 +95,7 @@ pub fn compute_split(
             .ok_or(SplitError::Overflow)?;
     }
     if bps_sum != BPS_DENOMINATOR {
-        return Err(SplitError::InvalidSplit);
+        return Err(SplitError::WeightMismatch);
     }
 
     // Reject self-payouts: a recipient equal to the contract's own address
@@ -80,7 +112,7 @@ pub fn compute_split(
     let fee = (total
         .checked_mul(fee_bps as i128)
         .ok_or(SplitError::Overflow)?)
-    / BPS_DENOMINATOR;
+        / BPS_DENOMINATOR;
     let distributable = total.checked_sub(fee).ok_or(SplitError::Overflow)?;
 
     let mut shares: Vec<(Address, i128)> = Vec::new(env);
@@ -110,10 +142,14 @@ pub fn compute_split(
         .ok_or(SplitError::Overflow)?;
     if dust > 0 {
         sort_remainders_desc(&mut order);
-        for k in 0..dust as u32 {
+        let dust = u32::try_from(dust).map_err(|_| SplitError::Overflow)?;
+        for k in 0..dust {
             let (index, _, _) = order.get(k).unwrap();
             let (recipient, share) = shares.get(index).unwrap();
-            shares.set(index, (recipient, share.checked_add(1).ok_or(SplitError::Overflow)?));
+            shares.set(
+                index,
+                (recipient, share.checked_add(1).ok_or(SplitError::Overflow)?),
+            );
         }
     }
 
@@ -194,5 +230,38 @@ pub fn sort_remainders_desc(order: &mut Vec<(u32, i128, Address)>) {
         order.set(0, b);
         order.set(end, a);
         sift_down_remainder_order(order, 0, end);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{contract, contractimpl, testutils::Address as _};
+
+    #[contract]
+    struct SplitTestContract;
+
+    #[contractimpl]
+    impl SplitTestContract {}
+
+    #[test]
+    fn compute_split_enforces_recipient_limit() {
+        let env = Env::default();
+        let contract_id = env.register(SplitTestContract, ());
+        let mut recipients = Vec::new(&env);
+        for _ in 0..MAX_RECIPIENTS {
+            recipients.push_back((Address::generate(&env), 500u32));
+        }
+
+        let payouts = env.as_contract(&contract_id, || {
+            compute_split(&env, 1_000, 0, &recipients).unwrap()
+        });
+        assert_eq!(payouts.shares.len(), MAX_RECIPIENTS);
+
+        recipients.push_back((Address::generate(&env), 0));
+        let result = env.as_contract(&contract_id, || {
+            compute_split(&env, 1_000, 0, &recipients)
+        });
+        assert!(matches!(result, Err(SplitError::TooManyRecipients)));
     }
 }

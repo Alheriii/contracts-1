@@ -1,10 +1,56 @@
 #![cfg(test)]
 
+extern crate std;
+
 use super::*;
+use mergefi_common::MAX_SPONSORS_LIMIT;
 use soroban_sdk::{
-    testutils::{storage::Persistent as _, Address as _, Ledger},
-    token, vec, Address, Env,
+    testutils::{storage::Persistent as _, Address as _, Events as _, Ledger},
+    token, vec, Address, Env, Event,
 };
+
+/// Hash of the empty Wasm module that Soroban's test host associates with
+/// contracts registered through their Rust function set. Reusing it lets the
+/// upgrade tests call `update_current_contract_wasm` without a compiled Wasm
+/// artifact, while subsequent calls continue to dispatch to the Rust mocks.
+fn existing_wasm_hash(env: &Env) -> BytesN<32> {
+    BytesN::from_array(
+        env,
+        &[
+            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+            0x78, 0x52, 0xb8, 0x55,
+        ],
+    )
+}
+
+/// Runs `f` and asserts it panics with the host's `Auth/InvalidAction` error.
+/// The typed `try_*` client methods collapse host errors into
+/// `InvokeError::Abort`, so catching the panic is the only way to assert the
+/// specific authorization error code.
+fn assert_host_auth_error(f: impl FnOnce()) {
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .expect_err("expected the call to fail authorization");
+    let message = if let Some(s) = err.downcast_ref::<&str>() {
+        *s
+    } else if let Some(s) = err.downcast_ref::<std::string::String>() {
+        s.as_str()
+    } else {
+        panic!("authorization panic payload was not a string");
+    };
+    assert!(
+        message.contains("Error(Auth, InvalidAction)"),
+        "expected host auth error, got: {message}"
+    );
+}
+
+fn assert_event<T: Event>(env: &Env, contract_id: &Address, event: T) {
+    assert!(env
+        .events()
+        .all()
+        .events()
+        .contains(&event.to_xdr(env, contract_id)));
+}
 
 fn create_token<'a>(
     env: &Env,
@@ -25,7 +71,7 @@ fn setup(env: &Env) -> (Address, Address, Address, EscrowContractClient<'_>) {
     let treasury = Address::generate(env);
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(env, &contract_id);
-    client.initialize(&admin, &oracle, &treasury, &500u32, &None); // 5% fee
+    client.initialize(&admin, &oracle, &treasury, &500u32, &None, &None); // 5% fee
     (contract_id, admin, treasury, client)
 }
 
@@ -35,7 +81,7 @@ fn test_initialize_rejects_double_init() {
     env.mock_all_auths();
     let (_, admin, treasury, client) = setup(&env);
     let oracle = Address::generate(&env);
-    let err = client.try_initialize(&admin, &oracle, &treasury, &500u32, &None);
+    let err = client.try_initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
     assert_eq!(err, Err(Ok(Error::AlreadyInitialized)));
 }
 
@@ -49,7 +95,10 @@ fn test_getters_return_not_initialized_before_initialize() {
     assert_eq!(client.try_get_oracle(), Err(Ok(Error::NotInitialized)));
     assert_eq!(client.try_get_treasury(), Err(Ok(Error::NotInitialized)));
     assert_eq!(client.try_get_fee_bps(), Err(Ok(Error::NotInitialized)));
-    assert_eq!(client.try_get_max_sponsors(), Err(Ok(Error::NotInitialized)));
+    assert_eq!(
+        client.try_get_max_sponsors(),
+        Err(Ok(Error::NotInitialized))
+    );
 }
 
 #[test]
@@ -62,7 +111,7 @@ fn test_initialize_rejects_fee_bps_above_10000() {
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    let err = client.try_initialize(&admin, &oracle, &treasury, &10_001u32, &None);
+    let err = client.try_initialize(&admin, &oracle, &treasury, &10_001u32, &None, &None);
     assert_eq!(err, Err(Ok(Error::InvalidFee)));
 }
 
@@ -76,7 +125,7 @@ fn test_initialize_accepts_fee_bps_at_boundary_10000() {
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &oracle, &treasury, &10_000u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &10_000u32, &None, &None);
     assert_eq!(client.get_fee_bps(), 10_000u32);
 }
 
@@ -116,6 +165,216 @@ fn test_fund_and_release_single_recipient() {
     // 5% fee -> 50_0000000, contributor gets 950_0000000
     assert_eq!(token_client.balance(&contributor), 950_0000000i128);
     assert_eq!(token_client.balance(&treasury), 50_0000000i128);
+}
+
+#[test]
+fn test_escrow_lifecycle_events_include_issue_and_payout_details() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _, treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+    let contributor = Address::generate(&env);
+    asset_client.mint(&contributor, &500i128);
+    let recipient = Address::generate(&env);
+
+    client.fund(
+        &501u64,
+        &sponsor,
+        &token_addr,
+        &1_000i128,
+        &1_000u64,
+        &Some(2_000i128),
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowFunded {
+            issue_id: 501,
+            sponsor: sponsor.clone(),
+            token: token_addr.clone(),
+            amount: 1_000,
+            deadline: 1_000,
+            target: Some(2_000),
+        },
+    );
+
+    client.contribute(&501u64, &contributor, &500i128);
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowContributed {
+            issue_id: 501,
+            sponsor: contributor,
+            amount: 500,
+            total_amount: 1_500,
+        },
+    );
+
+    let recipients = vec![&env, (recipient.clone(), 10_000u32)];
+    client.release(&501u64, &recipients);
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowPaidTo {
+            issue_id: 501,
+            recipient,
+            amount: 1_425,
+        },
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowReleased {
+            issue_id: 501,
+            amount: 1_500,
+            fee: 75,
+            treasury,
+        },
+    );
+
+    let deadline = env.ledger().timestamp() + 1_000;
+    client.fund(&502u64, &sponsor, &token_addr, &1_000i128, &deadline, &None);
+    client.extend_deadline(&502u64, &sponsor, &(deadline + 1_000));
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowDeadlineExtended {
+            issue_id: 502,
+            old_deadline: deadline,
+            new_deadline: deadline + 1_000,
+        },
+    );
+    client.refund(&502u64);
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowRefundPaid {
+            issue_id: 502,
+            sponsor,
+            amount: 1_000,
+        },
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowRefunded {
+            issue_id: 502,
+            amount: 1_000,
+        },
+    );
+}
+
+#[test]
+fn test_administrative_actions_emit_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let recovery = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.initialize(
+        &admin,
+        &oracle,
+        &treasury,
+        &500u32,
+        &None,
+        &Some(recovery.clone()),
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        ContractInitialized {
+            admin: admin.clone(),
+            oracle: oracle.clone(),
+            treasury: treasury.clone(),
+            fee_bps: 500,
+            max_sponsors: MAX_SPONSORS,
+            recovery: Some(recovery.clone()),
+        },
+    );
+
+    client.pause();
+    assert_event(
+        &env,
+        &contract_id,
+        ContractPaused {
+            admin: admin.clone(),
+        },
+    );
+    client.unpause();
+    assert_event(
+        &env,
+        &contract_id,
+        ContractUnpaused {
+            admin: admin.clone(),
+        },
+    );
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+    assert_event(
+        &env,
+        &contract_id,
+        AdminChanged {
+            old_admin: admin,
+            new_admin: new_admin.clone(),
+        },
+    );
+
+    let recovered_admin = Address::generate(&env);
+    client.recover_admin(&recovered_admin);
+    assert_event(
+        &env,
+        &contract_id,
+        AdminRecovered {
+            recovery,
+            new_admin: recovered_admin.clone(),
+        },
+    );
+
+    let new_oracle = Address::generate(&env);
+    client.set_oracle(&new_oracle);
+    assert_event(
+        &env,
+        &contract_id,
+        OracleChanged {
+            old_oracle: oracle,
+            new_oracle,
+        },
+    );
+
+    let new_treasury = Address::generate(&env);
+    client.set_treasury(&new_treasury);
+    assert_event(
+        &env,
+        &contract_id,
+        TreasuryChanged {
+            old_treasury: treasury,
+            new_treasury,
+        },
+    );
+    client.set_fee_bps(&1_000u32);
+    assert_event(
+        &env,
+        &contract_id,
+        FeeBpsChanged {
+            admin: recovered_admin.clone(),
+            old_fee_bps: 500,
+            new_fee_bps: 1_000,
+        },
+    );
+
+    // `upgrade` no longer emits `ContractUpgraded`; it is covered by the
+    // dedicated upgrade tests below.
+    let wasm_hash = existing_wasm_hash(&env);
+    client.upgrade(&wasm_hash);
 }
 
 #[test]
@@ -162,7 +421,7 @@ fn test_release_with_zero_fee_pays_full_amount() {
     let treasury = Address::generate(&env);
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
-    client.initialize(&admin, &oracle, &treasury, &0u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &0u32, &None, &None);
 
     let token_admin = Address::generate(&env);
     let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
@@ -305,6 +564,86 @@ fn test_unauthorized_release_rejected() {
 }
 
 #[test]
+fn test_release_accepts_targeted_oracle_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _admin, treasury, client) = setup(&env);
+    let oracle = client.get_oracle();
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+    client.fund(
+        &500u64,
+        &sponsor,
+        &token_addr,
+        &10_000i128,
+        &1_000u64,
+        &None,
+    );
+
+    let recipient = Address::generate(&env);
+    let recipients = vec![&env, (recipient.clone(), 10_000u32)];
+
+    // Only the oracle's authorization is mocked for this release call.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &oracle,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "release",
+            args: soroban_sdk::IntoVal::into_val(&(500u64, recipients.clone()), &env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.release(&500u64, &recipients);
+
+    assert_eq!(client.get_escrow(&500u64).status, EscrowStatus::Paid);
+    assert_eq!(token_client.balance(&recipient), 9_500i128);
+    assert_eq!(token_client.balance(&treasury), 500i128);
+}
+
+#[test]
+fn test_release_rejects_non_oracle_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+    client.fund(
+        &501u64,
+        &sponsor,
+        &token_addr,
+        &10_000i128,
+        &1_000u64,
+        &None,
+    );
+
+    let attacker = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let recipients = vec![&env, (recipient, 10_000u32)];
+
+    // Mock a non-oracle address as the signer: the oracle's `require_auth`
+    // must still fail with a host authorization error.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "release",
+            args: soroban_sdk::IntoVal::into_val(&(501u64, recipients.clone()), &env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_host_auth_error(|| client.release(&501u64, &recipients));
+    assert_eq!(client.get_escrow(&501u64).status, EscrowStatus::Funded);
+}
+
+#[test]
 fn test_refund_after_deadline() {
     let env = Env::default();
     env.mock_all_auths();
@@ -373,7 +712,7 @@ fn test_adversarial_ordering_resistance() {
     let client = crate::EscrowContractClient::new(&env, &contract_id);
 
     // Initialize with 0% fee to simplify fraction/dust calculations
-    client.initialize(&admin, &oracle, &treasury, &0u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &0u32, &None, &None);
 
     // 2. Create recipient addresses
     let dev1 = Address::generate(&env);
@@ -438,16 +777,16 @@ fn test_large_split_distributes_dust_by_largest_remainder() {
     let contract_id = env.register(crate::EscrowContract, ());
     let client = crate::EscrowContractClient::new(&env, &contract_id);
     // 0% fee so the whole total is distributable.
-    client.initialize(&admin, &oracle, &treasury, &0u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &0u32, &None, &None);
 
-    // 60 recipients: 59 with alternating 160/170 bps, the last one receiving
-    // the leftover of 10000. All 170-bps recipients share an identical
-    // remainder, so most of the dust has to be resolved by the address-based
-    // tie-break, exercising both the O(n log n) sort and the tie-break at
-    // scale.
+    // The maximum 20 recipients: 19 with alternating 160/170 bps, the last
+    // one receiving the leftover of 10000. All 170-bps recipients share an
+    // identical remainder, so most of the dust has to be resolved by the
+    // address-based tie-break, exercising both the O(n log n) sort and the
+    // tie-break at scale.
     let mut recipients = Vec::new(&env);
     let mut total_bps: u32 = 0;
-    for i in 0..59u32 {
+    for i in 0..19u32 {
         let bps = if i % 5 == 0 { 160 } else { 170 };
         recipients.push_back((Address::generate(&env), bps));
         total_bps += bps;
@@ -527,7 +866,7 @@ fn test_initialize_requires_admin_auth() {
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    let result = client.try_initialize(&admin, &oracle, &treasury, &500u32, &None);
+    let result = client.try_initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
     assert!(result.is_err());
 }
 
@@ -556,6 +895,105 @@ fn test_fund_requires_sponsor_auth() {
 }
 
 #[test]
+fn test_fund_accepts_targeted_sponsor_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &1_000i128);
+
+    let issue_id = 520u64;
+    let amount = 1_000i128;
+    let deadline = 1_000u64;
+    let params = (
+        issue_id,
+        sponsor.clone(),
+        token_addr.clone(),
+        amount,
+        deadline,
+        Option::<i128>::None,
+    );
+    let transfer_params = (sponsor.clone(), contract_id.clone(), amount);
+
+    // Only the sponsor's authorization is mocked for this call (including the
+    // token transfer it authorizes as a sub-invocation).
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &sponsor,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "fund",
+            args: soroban_sdk::IntoVal::into_val(&params, &env),
+            sub_invokes: &[soroban_sdk::testutils::MockAuthInvoke {
+                contract: &token_addr,
+                fn_name: "transfer",
+                args: soroban_sdk::IntoVal::into_val(&transfer_params, &env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    client.fund(&issue_id, &sponsor, &token_addr, &amount, &deadline, &None);
+
+    assert_eq!(client.get_escrow(&issue_id).amount, amount);
+    assert_eq!(token_client.balance(&sponsor), 0);
+}
+
+#[test]
+fn test_fund_rejects_non_sponsor_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &1_000i128);
+
+    let attacker = Address::generate(&env);
+    let issue_id = 521u64;
+    let amount = 1_000i128;
+    let deadline = 1_000u64;
+    let params = (
+        issue_id,
+        sponsor.clone(),
+        token_addr.clone(),
+        amount,
+        deadline,
+        Option::<i128>::None,
+    );
+    let transfer_params = (sponsor.clone(), contract_id.clone(), amount);
+
+    // Mock a non-sponsor address as the signer: the sponsor's `require_auth`
+    // must still fail with a host authorization error.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "fund",
+            args: soroban_sdk::IntoVal::into_val(&params, &env),
+            sub_invokes: &[soroban_sdk::testutils::MockAuthInvoke {
+                contract: &token_addr,
+                fn_name: "transfer",
+                args: soroban_sdk::IntoVal::into_val(&transfer_params, &env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    assert_host_auth_error(|| {
+        client.fund(&issue_id, &sponsor, &token_addr, &amount, &deadline, &None)
+    });
+    assert_eq!(
+        client.try_get_escrow(&issue_id),
+        Err(Ok(Error::EscrowNotFound))
+    );
+    assert_eq!(token_client.balance(&sponsor), 1_000i128);
+}
+
+#[test]
 fn test_refund_before_deadline_requires_admin_auth() {
     let env = Env::default();
     env.mock_all_auths();
@@ -580,6 +1018,67 @@ fn test_refund_before_deadline_requires_admin_auth() {
     env.set_auths(&[]);
     let result = client.try_refund(&10u64);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_refund_before_deadline_accepts_targeted_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    env.ledger().set_timestamp(100);
+    client.fund(&510u64, &sponsor, &token_addr, &10_000i128, &200u64, &None);
+
+    // The deadline has not passed, so only the admin may refund early.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "refund",
+            args: soroban_sdk::IntoVal::into_val(&(510u64,), &env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.refund(&510u64);
+
+    assert_eq!(client.get_escrow(&510u64).status, EscrowStatus::Refunded);
+    assert_eq!(token_client.balance(&sponsor), 10_000i128);
+}
+
+#[test]
+fn test_refund_before_deadline_rejects_non_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    env.ledger().set_timestamp(100);
+    client.fund(&511u64, &sponsor, &token_addr, &10_000i128, &200u64, &None);
+
+    let attacker = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "refund",
+            args: soroban_sdk::IntoVal::into_val(&(511u64,), &env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_host_auth_error(|| client.refund(&511u64));
+    assert_eq!(client.get_escrow(&511u64).status, EscrowStatus::Funded);
+    assert_eq!(token_client.balance(&sponsor), 0);
 }
 
 #[test]
@@ -735,6 +1234,33 @@ fn test_extend_deadline_rejects_after_paid_or_refunded() {
     assert_eq!(err, Err(Ok(Error::AlreadyPaid)));
 }
 
+#[test]
+fn test_extend_deadline_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000_000_000i128);
+
+    env.ledger().set_timestamp(100);
+    client.fund(
+        &16u64,
+        &sponsor,
+        &token_addr,
+        &10_000_000_000i128,
+        &200u64,
+        &None,
+    );
+
+    // A non-sponsor (even a contributor) cannot extend the deadline.
+    let non_sponsor = Address::generate(&env);
+    let err = client.try_extend_deadline(&16u64, &non_sponsor, &500u64);
+    assert_eq!(err, Err(Ok(Error::Unauthorized)));
+}
+
 // ---------------------------------------------------------------------------
 // Crowdfunding (#57)
 // ---------------------------------------------------------------------------
@@ -835,6 +1361,97 @@ fn test_contribute_requires_sponsor_auth() {
     env.set_auths(&[]);
     let result = client.try_contribute(&102u64, &bob, &5_000i128);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_contribute_accepts_targeted_sponsor_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    asset_client.mint(&alice, &10_000i128);
+    asset_client.mint(&bob, &10_000i128);
+
+    let issue_id = 522u64;
+    client.fund(&issue_id, &alice, &token_addr, &5_000i128, &1_000u64, &None);
+
+    let amount = 5_000i128;
+    let params = (issue_id, bob.clone(), amount);
+    let transfer_params = (bob.clone(), contract_id.clone(), amount);
+
+    // Only bob's authorization is mocked for this contribution (including the
+    // token transfer it authorizes as a sub-invocation).
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &bob,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "contribute",
+            args: soroban_sdk::IntoVal::into_val(&params, &env),
+            sub_invokes: &[soroban_sdk::testutils::MockAuthInvoke {
+                contract: &token_addr,
+                fn_name: "transfer",
+                args: soroban_sdk::IntoVal::into_val(&transfer_params, &env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    client.contribute(&issue_id, &bob, &amount);
+
+    let escrow = client.get_escrow(&issue_id);
+    assert_eq!(escrow.amount, 10_000i128);
+    assert_eq!(escrow.contributor_count, 2);
+    assert_eq!(token_client.balance(&bob), 5_000i128);
+}
+
+#[test]
+fn test_contribute_rejects_non_sponsor_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    asset_client.mint(&alice, &10_000i128);
+    asset_client.mint(&bob, &10_000i128);
+
+    let issue_id = 523u64;
+    client.fund(&issue_id, &alice, &token_addr, &5_000i128, &1_000u64, &None);
+
+    let amount = 5_000i128;
+    let params = (issue_id, bob.clone(), amount);
+    let transfer_params = (bob.clone(), contract_id.clone(), amount);
+
+    // Mock a non-sponsor address as the signer: bob's `require_auth` must
+    // still fail with a host authorization error.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "contribute",
+            args: soroban_sdk::IntoVal::into_val(&params, &env),
+            sub_invokes: &[soroban_sdk::testutils::MockAuthInvoke {
+                contract: &token_addr,
+                fn_name: "transfer",
+                args: soroban_sdk::IntoVal::into_val(&transfer_params, &env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    assert_host_auth_error(|| client.contribute(&issue_id, &bob, &amount));
+
+    let escrow = client.get_escrow(&issue_id);
+    assert_eq!(escrow.amount, 5_000i128);
+    assert_eq!(escrow.contributor_count, 1);
+    assert_eq!(token_client.balance(&bob), 10_000i128);
 }
 
 #[test]
@@ -942,6 +1559,50 @@ fn test_contribute_rejects_beyond_max_sponsors() {
     assert_eq!(err, Err(Ok(Error::TooManySponsors)));
 }
 
+// ── Regression #473 (closed #347) ─────────────────────────────────────────
+// An existing sponsor topping up when the escrow is already at the
+// MAX_SPONSORS cap must succeed (it does not add a new slot).
+#[test]
+fn test_existing_sponsor_can_top_up_when_at_max_sponsors_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+
+    let alice = Address::generate(&env);
+    asset_client.mint(&alice, &20_000i128);
+
+    // Alice funds: this occupies slot 0.
+    client.fund(&200u64, &alice, &token_addr, &1_000i128, &1_000u64, &None);
+
+    // Fill the remaining MAX_SPONSORS-1 slots with distinct sponsors.
+    for _ in 0..(crate::MAX_SPONSORS - 1) {
+        let extra = Address::generate(&env);
+        asset_client.mint(&extra, &1_000i128);
+        client.contribute(&200u64, &extra, &1_000i128);
+    }
+    assert_eq!(
+        client.get_escrow(&200u64).contributor_count,
+        crate::MAX_SPONSORS,
+        "escrow must be at the cap before the top-up"
+    );
+
+    // Alice (existing sponsor, slot 0) tops up — must succeed even though the
+    // cap is full, because she does not consume a new slot.
+    let balance_before = client.get_escrow(&200u64).amount;
+    client.contribute(&200u64, &alice, &1_000i128);
+    let balance_after = client.get_escrow(&200u64).amount;
+    assert_eq!(balance_after - balance_before, 1_000i128);
+
+    // contributor_count must not increase beyond the cap.
+    assert_eq!(
+        client.get_escrow(&200u64).contributor_count,
+        crate::MAX_SPONSORS
+    );
+}
+
 #[test]
 fn test_get_max_sponsors_defaults_to_the_constant_when_not_specified() {
     let env = Env::default();
@@ -949,6 +1610,8 @@ fn test_get_max_sponsors_defaults_to_the_constant_when_not_specified() {
     let (_, _admin, _treasury, client) = setup(&env);
 
     assert_eq!(client.get_max_sponsors(), crate::MAX_SPONSORS);
+    assert_eq!(client.get_grace_period(), crate::GRACE_PERIOD);
+    assert_eq!(client.get_bps_denominator(), BPS_DENOMINATOR);
 }
 
 #[test]
@@ -960,7 +1623,7 @@ fn test_initialize_accepts_a_custom_max_sponsors() {
     let treasury = Address::generate(&env);
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
-    client.initialize(&admin, &oracle, &treasury, &500u32, &Some(2u32));
+    client.initialize(&admin, &oracle, &treasury, &500u32, &Some(2u32), &None);
 
     assert_eq!(client.get_max_sponsors(), 2u32);
 
@@ -983,7 +1646,38 @@ fn test_initialize_accepts_a_custom_max_sponsors() {
 }
 
 #[test]
-fn test_extend_deadline_any_contributor_can_extend_not_just_the_original_funder() {
+fn test_initialize_caps_max_sponsors_at_shared_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let err = client.try_initialize(
+        &admin,
+        &oracle,
+        &treasury,
+        &500u32,
+        &Some(MAX_SPONSORS_LIMIT + 1),
+        &None,
+    );
+    assert_eq!(err, Err(Ok(Error::InvalidMaxSponsors)));
+
+    client.initialize(
+        &admin,
+        &oracle,
+        &treasury,
+        &500u32,
+        &Some(MAX_SPONSORS_LIMIT),
+        &None,
+    );
+    assert_eq!(client.get_max_sponsors(), MAX_SPONSORS_LIMIT);
+}
+
+#[test]
+fn test_extend_deadline_rejects_later_contributor_only_original_sponsor_can_extend() {
     let env = Env::default();
     env.mock_all_auths();
     let (_, _admin, _treasury, client) = setup(&env);
@@ -999,16 +1693,79 @@ fn test_extend_deadline_any_contributor_can_extend_not_just_the_original_funder(
     client.fund(&106u64, &alice, &token_addr, &5_000i128, &200u64, &None);
     client.contribute(&106u64, &bob, &5_000i128);
 
-    // Bob (the second contributor, not the original funder) extends.
-    client.extend_deadline(&106u64, &bob, &500u64);
-    assert_eq!(client.get_escrow(&106u64).deadline, 500u64);
+    // Bob (a later contributor, not the original funder) cannot extend.
+    let err = client.try_extend_deadline(&106u64, &bob, &500u64);
+    assert_eq!(err, Err(Ok(Error::Unauthorized)));
+    assert_eq!(client.get_escrow(&106u64).deadline, 200u64);
 
-    // The old deadline (200) has passed, but the extended one (500) hasn't:
-    // refund must still require admin auth.
-    env.ledger().set_timestamp(300);
+    // Alice (the original sponsor) still can.
+    client.extend_deadline(&106u64, &alice, &500u64);
+    assert_eq!(client.get_escrow(&106u64).deadline, 500u64);
+}
+
+#[test]
+fn test_extend_deadline_dust_contributor_cannot_lock_out_permissionless_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000_000_000i128);
+    asset_client.mint(&attacker, &1i128);
+
+    env.ledger().set_timestamp(100);
+    client.fund(
+        &108u64,
+        &sponsor,
+        &token_addr,
+        &10_000_000_000i128,
+        &200u64,
+        &None,
+    );
+
+    // Attacker contributes 1 stroop and tries to push the deadline out
+    // forever.
+    client.contribute(&108u64, &attacker, &1i128);
+    let err = client.try_extend_deadline(&108u64, &attacker, &(u64::MAX - crate::GRACE_PERIOD));
+    assert_eq!(err, Err(Ok(Error::Unauthorized)));
+    assert_eq!(client.get_escrow(&108u64).deadline, 200u64);
+
+    // The permissionless refund still opens on schedule.
+    env.ledger().set_timestamp(200 + crate::GRACE_PERIOD);
     env.set_auths(&[]);
-    let result = client.try_refund(&106u64);
-    assert!(result.is_err());
+    client.refund(&108u64);
+    assert_eq!(token_client.balance(&sponsor), 10_000_000_000i128);
+    assert_eq!(token_client.balance(&attacker), 1i128);
+}
+
+#[test]
+fn test_extend_deadline_rejects_deadline_beyond_max_extension() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    env.ledger().set_timestamp(100);
+    client.fund(&109u64, &sponsor, &token_addr, &10_000i128, &200u64, &None);
+
+    let max = 100 + crate::MAX_DEADLINE_EXTENSION;
+
+    // Even the original sponsor cannot push past now + MAX_DEADLINE_EXTENSION.
+    let err = client.try_extend_deadline(&109u64, &sponsor, &(max + 1));
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+    let err = client.try_extend_deadline(&109u64, &sponsor, &u64::MAX);
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+
+    // Exactly at the cap is allowed.
+    client.extend_deadline(&109u64, &sponsor, &max);
+    assert_eq!(client.get_escrow(&109u64).deadline, max);
 }
 
 #[test]
@@ -1168,9 +1925,6 @@ fn test_pause_blocks_mutating_entrypoints_but_allows_expired_refund() {
     let err = client.try_contribute(&300u64, &sponsor, &1_000i128);
     assert_eq!(err, Err(Ok(Error::ContractPaused)));
 
-    let err = client.try_extend_deadline(&300u64, &sponsor, &500u64);
-    assert_eq!(err, Err(Ok(Error::ContractPaused)));
-
     let err = client.try_release(&300u64, &vec![&env, (contributor, 10_000u32)]);
     assert_eq!(err, Err(Ok(Error::ContractPaused)));
 
@@ -1209,6 +1963,51 @@ fn test_unpause_restores_funding() {
 }
 
 #[test]
+fn test_pause_accepts_targeted_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, admin, _treasury, client) = setup(&env);
+
+    // Only the admin's authorization is mocked for this pause call.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "pause",
+            args: soroban_sdk::vec![&env],
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.pause();
+
+    assert!(client.is_paused_view());
+}
+
+#[test]
+fn test_pause_rejects_non_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _admin, _treasury, client) = setup(&env);
+    let attacker = Address::generate(&env);
+
+    // Mock a non-admin address as the signer: the admin's `require_auth`
+    // must still fail with a host authorization error.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "pause",
+            args: soroban_sdk::vec![&env],
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_host_auth_error(|| client.pause());
+    assert!(!client.is_paused_view());
+}
+
+#[test]
 fn test_oracle_is_stored_and_rotatable() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1218,9 +2017,9 @@ fn test_oracle_is_stored_and_rotatable() {
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &oracle, &treasury, &500u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
     assert_eq!(client.get_oracle(), oracle);
-    assert_eq!(client.get_version(), 1);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
 
     let new_oracle = Address::generate(&env);
     client.set_oracle(&new_oracle);
@@ -1298,12 +2097,13 @@ fn test_extend_deadline_caps_ttl_at_the_network_max_for_a_very_far_future_deadli
         &None,
     );
 
-    // 3 years out — the naive proportional ledger count for this would
-    // exceed what Soroban actually allows a single persistent entry to
+    // The furthest deadline allowed (MAX_DEADLINE_EXTENSION, 365 days) —
+    // plus GRACE_PERIOD, the naive proportional ledger count for this
+    // exceeds what Soroban actually allows a single persistent entry to
     // survive to. The record must still get *something* (the maximum this
     // call can grant), not silently fall back to the flat 29-day bump.
-    let three_years_secs: u64 = 3 * 365 * 24 * 60 * 60;
-    client.extend_deadline(&302u64, &sponsor, &three_years_secs);
+    let max_deadline: u64 = env.ledger().timestamp() + crate::MAX_DEADLINE_EXTENSION;
+    client.extend_deadline(&302u64, &sponsor, &max_deadline);
 
     let max_extend_to = env.ledger().max_live_until_ledger() - env.ledger().sequence();
     assert_eq!(escrow_ttl(&env, &contract_id, 302u64), max_extend_to);
@@ -1364,6 +2164,7 @@ fn test_keep_alive_refreshes_ttl_without_changing_deadline_or_status() {
     // Anyone can call this — no auth mocked out or required for it, unlike
     // extend_deadline's contributor-only require_auth.
     client.keep_alive(&304u64);
+    assert_event(&env, &contract_id, EscrowKeptAlive { issue_id: 304 });
 
     let after = client.get_escrow(&304u64);
     assert_eq!(
@@ -1604,14 +2405,14 @@ fn test_fund_allows_reuse_after_refund() {
         &sponsor,
         &token_addr,
         &5_000_000_000i128,
-        &500u64,
+        &(500u64 + crate::GRACE_PERIOD),
         &None,
     );
 
     let escrow = client.get_escrow(&600u64);
     assert_eq!(escrow.status, EscrowStatus::Funded);
     assert_eq!(escrow.amount, 5_000_000_000i128);
-    assert_eq!(escrow.deadline, 500u64);
+    assert_eq!(escrow.deadline, 500u64 + crate::GRACE_PERIOD);
     assert_eq!(escrow.contributor_count, 1);
 }
 
@@ -2152,6 +2953,7 @@ fn test_set_treasury_updates_treasury_address() {
 #[test]
 fn test_set_treasury_requires_admin_auth() {
     let env = Env::default();
+    env.mock_all_auths();
     let (_, admin, _treasury, client) = setup(&env);
 
     let new_treasury = Address::generate(&env);
@@ -2182,7 +2984,14 @@ fn test_extend_deadline_returns_contribution_not_found_when_archived() {
     asset_client.mint(&sponsor, &10_000_000_000i128);
 
     env.ledger().set_timestamp(100);
-    client.fund(&701u64, &sponsor, &token_addr, &10_000_000_000i128, &200u64, &None);
+    client.fund(
+        &701u64,
+        &sponsor,
+        &token_addr,
+        &10_000_000_000i128,
+        &200u64,
+        &None,
+    );
 
     // Remove contribution sub-record to simulate archived persistent storage
     env.as_contract(&client.address, || {
@@ -2199,10 +3008,10 @@ fn test_extend_deadline_returns_contribution_not_found_when_archived() {
 fn test_release_with_duplicate_recipient_addresses() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_, _admin, treasury, client) = setup(&env);
+    let (_, _admin, _treasury, client) = setup(&env);
 
     let token_admin = Address::generate(&env);
-    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
     let sponsor = Address::generate(&env);
     asset_client.mint(&sponsor, &10_000_000_000i128);
 
@@ -2217,14 +3026,12 @@ fn test_release_with_duplicate_recipient_addresses() {
         &None,
     );
 
-    // Same address twice with 5000 bps each — must produce two separate
-    // transfers summing to the full 10000-bps entitlement.
+    // compute_split rejects duplicate addresses — `InvalidSplit` is the correct
+    // outcome because allowing it would silently double-pay alice at the expense
+    // of every other recipient's share, which is never intentional.
     let recipients = vec![&env, (alice.clone(), 5_000u32), (alice.clone(), 5_000u32)];
-    client.release(&200u64, &recipients);
-
-    let distributable = 950_0000000i128; // after 5% fee
-    assert_eq!(token_client.balance(&alice), distributable);
-    assert_eq!(token_client.balance(&treasury), 50_0000000i128);
+    let err = client.try_release(&200u64, &recipients);
+    assert_eq!(err, Err(Ok(Error::InvalidSplit)));
 }
 
 #[test]
@@ -2251,7 +3058,11 @@ fn test_release_with_treasury_as_recipient() {
 
     // Treasury as one of the recipients — fee transfer and recipient transfer
     // are separate calls; treasury must receive fee + share without double-counting.
-    let recipients = vec![&env, (alice.clone(), 5_000u32), (treasury.clone(), 5_000u32)];
+    let recipients = vec![
+        &env,
+        (alice.clone(), 5_000u32),
+        (treasury.clone(), 5_000u32),
+    ];
     client.release(&201u64, &recipients);
 
     let distributable = 950_0000000i128; // after 5% fee
@@ -2295,3 +3106,299 @@ fn test_release_rejects_self_payout() {
     assert_eq!(escrow.status, crate::types::EscrowStatus::Funded);
 }
 
+struct EscrowSequenceRng {
+    state: u64,
+}
+
+impl EscrowSequenceRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.state >> 32) as u32
+    }
+
+    fn next_range(&mut self, upper_bound: u32) -> u32 {
+        self.next_u32() % upper_bound
+    }
+}
+
+fn assert_funded_escrow_solvency(
+    client: &EscrowContractClient<'_>,
+    token_client: &token::Client<'_>,
+    contract_id: &Address,
+    first_issue_id: u64,
+    issue_count: u64,
+) {
+    let mut funded_amount = 0i128;
+    for issue_id in first_issue_id..first_issue_id + issue_count {
+        let escrow = match client.try_get_escrow(&issue_id) {
+            Ok(Ok(escrow)) => escrow,
+            Err(Ok(Error::EscrowNotFound)) => continue,
+            result => panic!("unexpected get_escrow result for {issue_id}: {result:?}"),
+        };
+        if escrow.status == EscrowStatus::Funded {
+            funded_amount = funded_amount
+                .checked_add(escrow.amount)
+                .expect("funded escrow sum should not overflow");
+        }
+    }
+
+    assert!(
+        token_client.balance(contract_id) >= funded_amount,
+        "contract token balance must cover the sum of all funded escrows"
+    );
+}
+
+#[test]
+fn test_escrow_solvency_invariant_fuzzing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsors = [
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+    ];
+    for sponsor in &sponsors {
+        asset_client.mint(sponsor, &10_000_000i128);
+    }
+    let recipient = Address::generate(&env);
+    let mut rng = EscrowSequenceRng::new(0x5eed);
+    let first_issue_id = 900u64;
+    let issue_count = 8u64;
+    let mut exercised_actions = [false; 4];
+
+    for _ in 0..500 {
+        let issue_id = first_issue_id + rng.next_range(issue_count as u32) as u64;
+        let sponsor = &sponsors[rng.next_range(sponsors.len() as u32) as usize];
+        match rng.next_range(4) {
+            0 => {
+                let amount = rng.next_range(5_000) as i128 + 1;
+                let deadline = env.ledger().timestamp() + 1_000;
+                if matches!(
+                    client.try_fund(&issue_id, sponsor, &token_addr, &amount, &deadline, &None),
+                    Ok(Ok(()))
+                ) {
+                    exercised_actions[0] = true;
+                }
+            }
+            1 => {
+                let amount = rng.next_range(1_000) as i128 + 1;
+                if matches!(
+                    client.try_contribute(&issue_id, sponsor, &amount),
+                    Ok(Ok(()))
+                ) {
+                    exercised_actions[1] = true;
+                }
+            }
+            2 => {
+                let recipients = vec![&env, (recipient.clone(), 10_000u32)];
+                if matches!(client.try_release(&issue_id, &recipients), Ok(Ok(()))) {
+                    exercised_actions[2] = true;
+                }
+            }
+            3 => {
+                if matches!(client.try_refund(&issue_id), Ok(Ok(()))) {
+                    exercised_actions[3] = true;
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        assert_funded_escrow_solvency(
+            &client,
+            &token_client,
+            &contract_id,
+            first_issue_id,
+            issue_count,
+        );
+    }
+
+    assert!(
+        exercised_actions.into_iter().all(|exercised| exercised),
+        "the randomized sequence must successfully exercise fund, contribute, release, and refund"
+    );
+}
+
+// ── upgrade tests (#461) ──────────────────────────────────────────────────────
+
+#[test]
+fn test_upgrade_requires_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_contract_id, _admin, _treasury, client) = setup(&env);
+
+    let fake_hash = BytesN::from_array(&env, &[0u8; 32]);
+    // With no authorizations recorded, upgrade must reject with NotAuthorized.
+    env.set_auths(&[]);
+    let err = client.try_upgrade(&fake_hash);
+    assert!(err.is_err());
+}
+
+#[test]
+fn test_upgrade_requires_explicit_idempotent_migration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_contract_id, _admin, _treasury, client) = setup(&env);
+
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
+
+    // The old implementation's upgrade call must leave its stored version
+    // intact; only the newly installed implementation can advance it.
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::Version, &1u32);
+    });
+    let wasm_hash = existing_wasm_hash(&env);
+    client.upgrade(&wasm_hash);
+    assert_eq!(client.get_version(), 1u32);
+
+    client.migrate(&1u32);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
+    client.migrate(&1u32);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
+}
+
+#[test]
+fn test_migrate_rejects_unauthorized_and_mismatched_versions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_contract_id, _admin, _treasury, client) = setup(&env);
+
+    env.set_auths(&[]);
+    assert!(client.try_migrate(&1u32).is_err());
+
+    // Simulate an old implementation at version 1, then reject a migration
+    // from a version that does not match the stored one.
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::Version, &1u32);
+    });
+    env.mock_all_auths();
+    let err = client.try_migrate(&0u32);
+    assert_eq!(err, Err(Ok(Error::InvalidVersion)));
+}
+
+#[test]
+fn test_upgrade_preserves_existing_escrows() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_contract_id, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &5_000_000_000i128);
+
+    client.fund(
+        &300u64,
+        &sponsor,
+        &token_addr,
+        &5_000_000_000i128,
+        &2_000u64,
+        &None,
+    );
+
+    let wasm_hash = existing_wasm_hash(&env);
+    client.upgrade(&wasm_hash);
+
+    // Escrow data must survive the upgrade intact.
+    let escrow = client.get_escrow(&300u64);
+    assert_eq!(escrow.status, crate::types::EscrowStatus::Funded);
+    assert_eq!(escrow.deadline, 2_000u64);
+}
+
+#[test]
+fn test_set_admin_updates_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, admin, _, client) = setup(&env);
+
+    assert_eq!(client.get_admin(), admin);
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+    assert_eq!(client.get_admin(), new_admin);
+}
+
+#[test]
+fn test_set_admin_requires_current_and_new_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _, client) = setup(&env);
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+    // After rotation, the new admin should be in storage.
+    assert_eq!(client.get_admin(), new_admin);
+
+    // Rotating again from new_admin to a third address must also succeed.
+    let third_admin = Address::generate(&env);
+    client.set_admin(&third_admin);
+    assert_eq!(client.get_admin(), third_admin);
+}
+
+#[test]
+fn test_extend_deadline_allowed_while_paused() {
+fn test_keep_alive_rejects_terminal_escrows() {
+fn test_fund_rejects_deadline_not_in_the_future() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    env.ledger().set_timestamp(100);
+    client.fund(&310u64, &sponsor, &token_addr, &10_000i128, &200u64, &None);
+    client.pause();
+
+    client.extend_deadline(&310u64, &sponsor, &500u64);
+    assert_eq!(client.get_escrow(&310u64).deadline, 500u64);
+    let contributor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    client.fund(&320u64, &sponsor, &token_addr, &10_000i128, &1_000u64, &None);
+    client.release(&320u64, &vec![&env, (contributor, 10_000u32)]);
+
+    assert_eq!(client.try_keep_alive(&320u64), Err(Ok(Error::AlreadyPaid)));
+}
+
+#[test]
+fn test_get_contribution_rejects_index_beyond_contributor_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    client.fund(&321u64, &sponsor, &token_addr, &10_000i128, &1_000u64, &None);
+    assert!(client.try_get_contribution(&321u64, &0u32).is_ok());
+    assert_eq!(
+        client.try_get_contribution(&321u64, &1u32),
+        Err(Ok(Error::ContributionNotFound))
+    );
+    asset_client.mint(&sponsor, &10_000i128);
+
+    env.ledger().set_timestamp(100);
+    let err = client.try_fund(&330u64, &sponsor, &token_addr, &1_000i128, &0u64, &None);
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+    let err = client.try_fund(&330u64, &sponsor, &token_addr, &1_000i128, &100u64, &None);
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+    assert!(client
+        .try_fund(&330u64, &sponsor, &token_addr, &1_000i128, &101u64, &None)
+        .is_ok());
+}

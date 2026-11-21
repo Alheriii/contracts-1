@@ -11,7 +11,41 @@ change, not backfilled later.
 
 ## [Unreleased]
 
+### Changed
+- **ABI change**: Removed unused `Unauthorized` error variant (code 3) from
+  `milestones` and `maintenance-pool` contracts. These variants were declared
+  but never constructed — authorization failures use Soroban's
+  `require_auth()` host trap instead of returning an error. All subsequent
+  error codes have been renumbered downward by 1. Also fixed duplicate
+  error code 21 in `milestones` (`DeadlinePassed` and `DeadlineInPast` both
+  used 21; now `DeadlinePassed` = 21, `DeadlineInPast` = 22). The `escrow`
+  contract's `Unauthorized` variant remains (used in `extend_deadline`).
+  Update client-side error decoders (`scripts/error-codes.mjs`) accordingly.
+  (#319)
+- `compute_split` now rejects zero-bps recipients and duplicate addresses with
+  `InvalidSplit`, and it rejects self-payouts before any transfer executes
+  (#425).
+- Added explicit overflow error handling for arithmetic-boundary failures and
+  surfaced the dedicated `ArithmeticOverflow` family of variants instead of
+  relying on a host abort (#429).
+- Enforced the per-contract `MAX_DEPOSITS`/`TooManyDeposits` cap and added the
+  dedicated error code used by sponsor contribution flows (#427).
+- Typed contribution lookup failures (`ContributionNotFound` / related typed
+  errors) are now surfaced consistently instead of falling back to generic
+  logic (#421, #422).
+- Reclaim-window logic now aligns with the actual post-deadline grace-period
+  behavior used by the refund/recovery path (#423).
+
 ### Added
+- On-chain getters for grace periods, the basis-point denominator, the
+  maintenance-pool deposit cap, and its inactivity window (#450).
+- A shared `MAX_RECIPIENTS` cap and shared instance-storage TTL extension
+  helper with named thresholds and ledger-time derivation (#447, #451).
+
+### Fixed
+- Removed duplicate "Recent Changes" sections from the README; history is
+  maintained in this changelog (#452).
+
 - `CODEOWNERS`, pinning `contracts/`, `docs/` and `scripts/` review to the
   maintainer for automatic reviewer assignment on the high volume of
   external bounty-program PRs this repo receives (#301, cross-ref #117).
@@ -27,7 +61,7 @@ change, not backfilled later.
 Escrows gained multi-sponsor crowdfunding: several sponsors can contribute
 toward one escrow's funding target instead of a single sponsor funding it
 outright, with a permissionless refund path once the deadline plus
-`GRACE_PERIOD` has passed and the target wasn't met.
+`GRACE_PERIOD` has passed, regardless of whether the target was met.
 
 ### Pause / circuit-breaker mechanism (#14)
 `escrow`, `maintenance-pool`, and `milestones` each gained `pause`/`unpause`

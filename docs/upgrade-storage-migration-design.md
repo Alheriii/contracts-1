@@ -29,9 +29,9 @@ Primary references:
 
 ### Retrofitting Already-Deployed Contracts
 
-**Current Status**: The three deployed testnet contracts have **no upgrade function and cannot support in-place upgrades**. Any new code requires a full redeploy.
+**Current Status**: All three contracts now have an admin-gated `upgrade(new_wasm_hash)` function that supports in-place upgrades by calling `env.deployer().update_current_contract_wasm()`. The upgrade mechanism is implemented and functional. However, the migration step (calling `migrate(from_version)` after the upgrade) is not yet automated and must be invoked manually by the admin (tracked in #458).
 
-**Mitigation**: Before mainnet, redeploy all three contracts with upgrade support baked in from the start (no need to retrofit the testnet instances; they can be abandoned).
+**Deployment Readiness**: The contracts are ready for testnet and mainnet deployment with full upgrade support built in from the start.
 
 ## Storage Versioning Strategy
 
@@ -60,9 +60,9 @@ pub enum DataKey {
 }
 
 // Version tracking
-const CONTRACT_VERSION: u32 = 1;
+const CONTRACT_VERSION: u32 = 2;
 
-fn get_contract_version(env: &Env) -> u32 {
+fn get_version(env: &Env) -> u32 {
     env.storage()
         .instance()
         .get(&DataKey::Version)
@@ -91,12 +91,7 @@ fn set_contract_version(env: &Env, version: u32) {
 ## Upgrade Function Specification
 
 ```rust
-/// Admin-gated upgrade function. Requires the stored `Admin` address's authorization.
-/// Calls `env.deployer().update_current_contract_wasm(new_wasm_hash)` to upgrade
-/// the contract code in place while preserving storage.
-///
-/// After upgrade, the new code should immediately check the stored `Version` and
-/// perform any necessary lazy migrations if old data is detected.
+/// Admin-gated code upgrade. The old code leaves `Version` unchanged.
 pub fn upgrade(
     env: Env,
     new_wasm_hash: soroban_sdk::BytesN<32>,
@@ -105,12 +100,37 @@ pub fn upgrade(
     admin.require_auth();
 
     env.deployer().update_current_contract_wasm(new_wasm_hash);
+    extend_instance_ttl(&env);
+    Ok(())
+}
+
+/// Admin-gated, idempotent migration in the newly installed code.
+pub fn migrate(env: Env, from_version: u32) -> Result<(), Error> {
+    let admin = require_admin(&env).ok_or(Error::NotInitialized)?;
+    admin.require_auth();
+
+    let current_version = get_version(&env);
+    if current_version == CONTRACT_VERSION {
+        extend_instance_ttl(&env);
+        return Ok(());
+    }
+    if current_version != from_version || from_version >= CONTRACT_VERSION {
+        return Err(Error::InvalidVersion);
+    }
+
     set_contract_version(&env, CONTRACT_VERSION);
     extend_instance_ttl(&env);
-
     Ok(())
 }
 ```
+
+The upgrade and migration are separate invocations because the upgrade
+transaction executes the old WASM. The old implementation must never stamp
+the new code's version. An operator should upload the new WASM, invoke
+`upgrade(new_wasm_hash)`, then invoke `migrate(from_version)` using the new
+contract interface, and confirm `get_version()` before resuming normal
+operations. Current contract code is version 2 and accepts the stored
+version as `from_version`; repeating the migration after success is harmless.
 
 ## Pause Mechanism Integration
 
@@ -131,7 +151,7 @@ If a two-key oracle/admin model is implemented:
 
 1. **Upgrade Without Data**: Deploy a new version, verify the contract initializes cleanly.
 2. **Upgrade With Data**: Upgrade a contract with existing escrows/milestones/deposits, verify data survives and remains accessible.
-3. **Version Tracking**: Verify that `get_contract_version()` returns 0 before first upgrade, and increments correctly.
+3. **Version Tracking**: Verify that `get_version()` returns 0 before first upgrade, and increments correctly.
 4. **Lazy Migration**: Add optional fields to a struct, verify old entries still deserialize and new fields fill with defaults.
 5. **Explicit Migration**: Trigger `migrate_storage()` on a contract with outdated entries, verify correctness of rewritten entries.
 
@@ -139,9 +159,9 @@ If a two-key oracle/admin model is implemented:
 
 ### Testnet (Current)
 
-1. The three currently-deployed testnet contracts **cannot be upgraded in place** (no upgrade function).
-2. **Recommendation**: Do not invest in retrofitting them. Instead, redeploy all three with upgrade support before mainnet testing.
-3. Any data on the old testnet instances is abandoned; `mergefi-backend` migrates to the new contract IDs.
+1. All three contracts now include the `upgrade(new_wasm_hash)` function and support in-place upgrades.
+2. Contracts deployed with upgrade support can be upgraded without redeployment or data loss.
+3. The `migrate(from_version)` step after upgrade must be called manually by the admin (automation tracked in #458).
 
 ### Mainnet (Pre-Launch)
 
@@ -159,8 +179,9 @@ Soroban does not support "downgrading" a contract (reverting to an older wasm ha
 
 ## Backward Compatibility
 
-- **Existing testnet contracts**: No action required; they will be abandoned and redeployed.
-- **Existing mainnet contracts (if any, before this feature lands)**: A one-time "activate upgrade support" redeploy is required. This is why the recommendation is to land this feature *before* mainnet launch.
+- **Current contracts**: All three contracts (escrow, milestones, maintenance-pool) include upgrade support as of the current codebase.
+- **Testnet deployments**: New deployments include upgrade functionality by default. Legacy deployments without upgrade support would need redeployment, but this is a non-issue as the current code already includes the feature.
+- **Mainnet launch**: Contracts will be deployed with upgrade support built in from day one.
 
 ## Future Work
 

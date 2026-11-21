@@ -18,15 +18,30 @@ describe("scripts/deploy.mjs CLI argument validation", () => {
     }
   });
 
-  test("fails with exit code 1 when only secret is provided without wasm path", async () => {
+  test("rejects a positional secret instead of treating it as credentials", async () => {
     try {
-      await execFileAsync("node", ["scripts/deploy.mjs", "SDUMMYSECRET"], {
+      await execFileAsync("node", ["scripts/deploy.mjs", "SDUMMYSECRET", "fake.wasm"], {
         env: { ...process.env, DEPLOYER_SECRET: "" },
       });
       assert.fail("Expected process to exit with non-zero code");
     } catch (err) {
       assert.strictEqual(err.code, 1);
-      assert.match(err.stderr, /Usage/);
+      assert.match(err.stderr, /Usage: DEPLOYER_SECRET=S/);
+      assert.doesNotMatch(err.stderr, /insecure fallback/);
+    }
+  });
+});
+
+describe("scripts/deploy.mjs stdout / stderr separation", () => {
+  test("usage hint goes to stderr and stdout is empty", async () => {
+    try {
+      await execFileAsync("node", ["scripts/deploy.mjs"], {
+        env: { ...process.env, DEPLOYER_SECRET: "" },
+      });
+      assert.fail("Expected process to exit with non-zero code");
+    } catch (err) {
+      assert.match(err.stderr, /Usage:/);
+      assert.strictEqual(err.stdout, "");
     }
   });
 });

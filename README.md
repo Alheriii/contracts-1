@@ -153,15 +153,22 @@ fn extend_deadline(env, issue_id: u64, caller: Address, new_deadline: u64) -> Re
 fn keep_alive(env, issue_id: u64) -> Result<(), Error>;
 fn pause(env) -> Result<(), Error>;
 fn unpause(env) -> Result<(), Error>;
+fn is_paused_view(env) -> bool;
 fn upgrade(env, new_wasm_hash: BytesN<32>) -> Result<(), Error>;
+fn migrate(env, from_version: u32) -> Result<(), Error>;
 fn get_escrow(env, issue_id: u64) -> Result<Escrow, Error>;
 fn get_contribution(env, issue_id: u64, index: u32) -> Result<Contribution, Error>;
+fn get_contributions(env, issue_id: u64) -> Result<Vec<Contribution>, Error>;
 fn get_admin(env) -> Result<Address, Error>;
 fn get_oracle(env) -> Result<Address, Error>;
 fn get_treasury(env) -> Result<Address, Error>;
 fn get_fee_bps(env) -> Result<u32, Error>;
+fn set_fee_bps(env, new_fee_bps: u32) -> Result<(), Error>;
 fn get_version(env) -> u32;
 fn get_max_sponsors(env) -> Result<u32, Error>;
+fn set_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_oracle(env, new_oracle: Address) -> Result<(), Error>;
+fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
 ```
 
 - `fund`: `sponsor.require_auth()`. Transfers `amount` of `token` from the
@@ -177,7 +184,7 @@ fn get_max_sponsors(env) -> Result<u32, Error>;
   (`Contribution { sponsor, amount }`, queryable via `get_contribution`)
   so `refund` can return each sponsor's own amount to their own address.
   Capped at `max_sponsors` (an optional `initialize` parameter, defaulting
-  to `MAX_SPONSORS`, 20) distinct contributions per escrow
+  to `MAX_SPONSORS`, 20, and limited to 50) distinct contributions per escrow
   (`TooManySponsors` otherwise). Rejects `AlreadyPaid` / `AlreadyRefunded`.
   See `docs/escrow-crowdfunding-design.md` for the full design reasoning.
 - `release`: oracle-only (`require_auth` on the stored oracle address).
@@ -197,16 +204,16 @@ fn get_max_sponsors(env) -> Result<u32, Error>;
   own signature. Rejects `AlreadyPaid` / `AlreadyRefunded`. See
   `docs/refund-permissionless-analysis.md` for the economics/griefing
   analysis of the permissionless path.
-- `extend_deadline`: `caller.require_auth()`, and `caller` must be *any*
-  current contributor to the escrow (not necessarily the original `fund`
-  caller) — rejected with `Unauthorized` otherwise. Lets a contributor
-  push the shared `deadline` later if the group wants more time before
-  `refund`'s permissionless path opens — `new_deadline` must be strictly
-  later than both the stored deadline and the current ledger time, so it
-  can only delay that window, never shorten it. Rejects `AlreadyPaid` /
-  `AlreadyRefunded`. See `docs/escrow-crowdfunding-design.md` for why any
-  single contributor (rather than unanimous or weighted consent) can
-  extend. The record's persistent-storage TTL is scaled to (approximately)
+- `extend_deadline`: `caller.require_auth()`, and `caller` must be the
+  original sponsor (the `fund` caller, recorded as contribution index 0) —
+  any other contributor is rejected with `Unauthorized`, so someone who
+  contributes a dust amount cannot push the deadline out and lock every
+  other sponsor out of the permissionless `refund`. `new_deadline` must be
+  strictly later than both the stored deadline and the current ledger
+  time, and no later than `now + MAX_DEADLINE_EXTENSION` (365 days) —
+  `InvalidDeadline` otherwise. Rejects `AlreadyPaid` / `AlreadyRefunded`.
+  See `docs/escrow-crowdfunding-design.md` for why only the original
+  sponsor can extend. The record's persistent-storage TTL is scaled to (approximately)
   cover `new_deadline`, not just the flat ~29-day bump every other call
   applies — see "Data models" → "Storage & TTL" below for what that does
   and does not guarantee for a very far-future deadline.
@@ -229,18 +236,31 @@ fn initialize(env, admin: Address, oracle: Address, treasury: Address, fee_bps: 
 fn create_milestone(env, milestone_id: u64, sponsor: Address, token: Address, total_budget: i128) -> Result<(), Error>;
 fn contribute(env, milestone_id: u64, sponsor: Address, amount: i128) -> Result<(), Error>;
 fn allocate(env, milestone_id: u64, issue_id: u64, amount: i128) -> Result<(), Error>;
+fn deallocate(env, milestone_id: u64, issue_id: u64) -> Result<(), Error>;
 fn release_issue(env, milestone_id: u64, issue_id: u64, recipients: Vec<(Address, u32)>) -> Result<(), Error>;
 fn cancel_milestone(env, milestone_id: u64) -> Result<(), Error>;
+fn cancel_milestone_after_deadline(env, milestone_id: u64) -> Result<(), Error>;
+fn keep_alive(env, milestone_id: u64) -> Result<(), Error>;
 fn pause(env) -> Result<(), Error>;
 fn unpause(env) -> Result<(), Error>;
+fn is_paused_view(env) -> bool;
 fn upgrade(env, new_wasm_hash: BytesN<32>) -> Result<(), Error>;
+fn migrate(env, from_version: u32) -> Result<(), Error>;
 fn get_milestone(env, milestone_id: u64) -> Result<Milestone, Error>;
 fn get_issue_status(env, milestone_id: u64, issue_id: u64) -> Result<IssueStatus, Error>;
 fn get_contribution(env, milestone_id: u64, index: u32) -> Result<Contribution, Error>;
+fn get_contributions(env, milestone_id: u64) -> Result<Vec<Contribution>, Error>;
 fn get_admin(env) -> Result<Address, Error>;
 fn get_oracle(env) -> Result<Address, Error>;
+fn get_treasury(env) -> Result<Address, Error>;
+fn get_fee_bps(env) -> Result<u32, Error>;
+fn set_fee_bps(env, new_fee_bps: u32) -> Result<(), Error>;
 fn get_version(env) -> u32;
 fn get_max_sponsors(env) -> Result<u32, Error>;
+fn set_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_oracle(env, new_oracle: Address) -> Result<(), Error>;
+fn recover_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
 ```
 
 - `create_milestone`: the original sponsor deposits `total_budget` once;
@@ -258,8 +278,9 @@ fn get_max_sponsors(env) -> Result<u32, Error>;
   }`, queryable via `get_contribution`, with the original funder always
   at index 0) so a cancellation refund can return each sponsor's
   proportional share to their own address. Capped at `max_sponsors` (an
-  optional `initialize` parameter, defaulting to `MAX_SPONSORS`, 20)
-  distinct contributions per milestone (`TooManySponsors` otherwise).
+  optional `initialize` parameter, defaulting to `MAX_SPONSORS`, 20) and
+  limited to 50 distinct contributions per milestone (`TooManySponsors`
+  otherwise).
   Rejects `MilestoneClosed`. See
   `docs/milestones-crowdfunding-design.md` for the full design reasoning.
 - `allocate`: admin-only. Reserves a slice of `remaining_budget` for a
@@ -290,9 +311,12 @@ fn deposit(env, pool_id: u64, sponsor: Address, token: Address, amount: i128) ->
 fn withdraw(env, pool_id: u64, recipient: Address, amount: i128) -> Result<(), Error>;
 fn reclaim_deposit(env, pool_id: u64, deposit_index: u32, sponsor: Address) -> Result<(), Error>;
 fn keep_alive(env, pool_id: u64) -> Result<(), Error>;
+fn sweep(env, pool_id: u64, recipient: Address) -> Result<(), Error>;
 fn pause(env) -> Result<(), Error>;
 fn unpause(env) -> Result<(), Error>;
+fn is_paused_view(env) -> bool;
 fn upgrade(env, new_wasm_hash: BytesN<32>) -> Result<(), Error>;
+fn migrate(env, from_version: u32) -> Result<(), Error>;
 fn get_pool(env, pool_id: u64) -> Result<MaintenancePool, Error>;
 fn get_deposit(env, pool_id: u64, index: u32) -> Result<Deposit, Error>;
 fn get_admin(env) -> Result<Address, Error>;
@@ -300,6 +324,13 @@ fn get_oracle(env) -> Result<Address, Error>;
 fn get_treasury(env) -> Result<Address, Error>;
 fn get_fee_bps(env) -> Result<u32, Error>;
 fn get_version(env) -> u32;
+fn set_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_oracle(env, new_oracle: Address) -> Result<(), Error>;
+fn recover_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
+fn recover_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
+fn is_paused_view(env) -> bool;
 ```
 
 - `pool_id` is an off-chain-assigned identifier for a repo or org (e.g. a
@@ -315,6 +346,73 @@ fn get_version(env) -> u32;
   merge the way escrow/milestones are; it's off-chain-adjudicated
   "maintenance credit"). Deducts the fee, rejects if `amount` exceeds the
   pool's current balance (`InsufficientBalance`).
+- `recover_admin`: recovery-address-only — if a `recovery` address was
+  supplied at `initialize`, that address may appoint a new admin. Covers
+  the "admin key permanently lost" scenario without requiring an upgrade.
+- `set_treasury`: admin-only — updates the treasury address that receives
+  the protocol fee on each `withdraw` call.
+- `is_paused_view`: read-only — returns `true` when the contract is
+  paused (i.e. `pause` has been called and `unpause` has not). Unlike
+  `pause`/`unpause` this does not require admin authorization.
+
+### When can sponsors get money back?
+
+Each contract has an admin-gated path that works at any time and a
+permissionless fallback that opens only after a fixed delay, so sponsors
+are protected even if the admin goes unresponsive. Funds on every path go
+back to the addresses on record — never to the caller.
+
+| Contract | Constant | Value |
+|---|---|---|
+| escrow | `GRACE_PERIOD` | 14 days (`14 * 24 * 60 * 60` s) |
+| escrow | `MAX_DEADLINE_EXTENSION` | 365 days (`365 * 24 * 60 * 60` s) past the current ledger time |
+| milestones | `GRACE_PERIOD` | 14 days (`14 * 24 * 60 * 60` s) |
+| maintenance-pool | `INACTIVITY_WINDOW` | 90 days (`90 * 24 * 60 * 60` s) |
+| maintenance-pool | `MAX_DEPOSITS` | 50 deposits per pool |
+
+**Escrow — `refund(issue_id)`**
+
+- Before `deadline + GRACE_PERIOD`: admin-only (`require_auth` on the
+  stored admin).
+- At or after `deadline + GRACE_PERIOD`: callable by anyone, no auth.
+- Every contributor gets back exactly their own contributed amount.
+- Rejected once the escrow is `Paid` (`AlreadyPaid`) or `Refunded`
+  (`AlreadyRefunded`). Not blocked by `pause`.
+- `extend_deadline` moves `deadline` later, which pushes the
+  permissionless window back by the same amount.
+
+**Milestones — `cancel_milestone` / `cancel_milestone_after_deadline`**
+
+- `cancel_milestone`: admin-only, any time.
+- `cancel_milestone_after_deadline`: callable by anyone, no auth, but only
+  at or after `deadline + GRACE_PERIOD` (`DeadlineNotPassed` before
+  that). `create_milestone` rejects a `deadline` that is not in the
+  future, so this path can never be open from the start.
+- Both refund only `remaining_budget` (never-allocated funds), split
+  across contributors in proportion to what each put in, then close the
+  milestone. Funds still reserved by `allocate` for an unreleased issue
+  are *not* refunded — the admin must `deallocate` them first.
+- Rejected once the milestone is closed (`MilestoneClosed`). Not blocked
+  by `pause`.
+
+**Maintenance pool — `reclaim_deposit(pool_id, deposit_index, sponsor)`**
+
+- No admin path; each deposit is reclaimed individually by its original
+  sponsor (`sponsor.require_auth()`, `NotDepositSponsor` otherwise).
+- Allowed only once `now >= last_activity + INACTIVITY_WINDOW`, where
+  `last_activity = max(pool.last_withdraw_at, pool.created_at,
+  deposit.timestamp)` (`InactivityWindowNotElapsed` before that). Every
+  oracle `withdraw` sets `last_withdraw_at` and so restarts the window
+  for all deposits in the pool; a reclaim does not.
+- Returns the deposit's pro-rata share of the current pool balance:
+  `pool.balance * deposit.amount / total_unreclaimed_deposits`. This prevents
+  an early claimant from taking another sponsor's share after shared
+  withdrawals. A reclaim can return less than the original deposit, and a
+  share that rounds to zero fails with `InsufficientBalance` without consuming
+  the claim. A deposit can be reclaimed only once (`AlreadyReclaimed`). Not
+  blocked by `pause`.
+- A pool holds at most `MAX_DEPOSITS` deposits (`TooManyDeposits` after
+  that), which bounds the number of separately reclaimable records.
 
 ## Data models
 
@@ -358,7 +456,7 @@ pub struct MaintenancePool {
     pub total_deposited: i128,
     pub total_withdrawn: i128,
     pub created_at: u64,
-    pub deposit_count: u32, // capped at u32::MAX (checked_add)
+    pub deposit_count: u32, // capped at MAX_DEPOSITS (50); further deposits rejected with DepositCountOverflow
 }
 pub struct Deposit {
     pub sponsor: Address,
@@ -371,8 +469,9 @@ Each contract's config (`Admin`, `Treasury`, `FeeBps`) lives in **instance
 storage** (small, always loaded with the contract). Per-issue/milestone/pool
 records live in **persistent storage** keyed by an enum (`DataKey`) so they
 survive independently and can be individually TTL-extended. The `deposit_count`
-in `MaintenancePool` is capped at `u32::MAX` to prevent overflow; further deposits
-are rejected with a typed `DepositCountOverflow` error.
+in `MaintenancePool` is capped at `MAX_DEPOSITS` (50) to bound the cost of
+per-deposit iteration loops; further deposits are rejected with a typed
+`DepositCountOverflow` error.
 
 ### Storage & TTL
 
@@ -409,6 +508,18 @@ once archived, becomes fully inaccessible — unreadable via `get_escrow`,
 unreleasable, unrefundable — until someone submits a `RestoreFootprint`
 operation. Restoring an archived entry is a real Soroban operation but is
 not automated by anything in this repo's scripts today.
+
+## Contract events
+
+The milestones and maintenance-pool contracts publish typed Soroban events
+for successful funding, allocation, payout, refund, recovery, and
+administrative operations. Milestone events index `milestone_id` and, where
+applicable, `issue_id`; maintenance-pool events index `pool_id`. Releases and
+withdrawals publish a summary containing the fee and treasury, plus one
+recipient event for each positive payout. Milestone cancellations and
+maintenance-pool reclaims likewise publish recipient-level refund events.
+Clients should consume these events for an auditable transaction history
+rather than infer transfers from state snapshots alone.
 
 ## Security model
 
@@ -495,9 +606,17 @@ integration points:
 
 1. **On issue funded (Stellar payment observed / sponsor UI flow):**
    nothing to do here — `fund`/`create_milestone`/`deposit` are called
-   directly by the sponsor's wallet, not by the backend. The backend just
-   indexes the resulting contract events / `get_escrow` state to reflect
-   funding status in the product UI.
+   directly by the sponsor's wallet, not by the backend. The backend
+   tracks funding status by polling the `get_escrow` / `get_milestone` /
+   `get_pool` view functions (free simulated calls — no signing or fee
+   required) and/or by streaming contract events from a Soroban RPC event
+   subscription. Escrow emits `EscrowFunded`, `EscrowContributed`,
+   `EscrowReleased` and `EscrowPaidTo`, `EscrowRefunded` and
+   `EscrowRefundPaid`, and `EscrowDeadlineExtended`; all escrow lifecycle
+   events include `issue_id` as an indexed topic. Administrative changes
+   (initialization, pause state, admin/oracle/treasury/fee changes, and
+   upgrades) are also emitted. The view-function path is authoritative
+   — events are best-effort delivery and may be pruned by the RPC node.
 2. **On PR merged (GitHub webhook):** backend resolves which
    `issue_id`/`milestone_id` the merged PR is tied to, resolves the
    contributor(s) and their split (single payee, or a team split it
@@ -529,12 +648,11 @@ or represented by a Stellar multisig / governance-controlled address.
 
 ### Prerequisites
 
-- Rust (this repo was built/tested against `rustc 1.95.0`).
+- Rust 1.95.0 (the version pinned in `rust-toolchain.toml` and used by CI).
 - The `wasm32v1-none` target for building deployable contract wasm:
   `rustup target add wasm32v1-none`.
   (Soroban's host requires this target rather than the legacy
-  `wasm32-unknown-unknown` on Rust 1.82+ — `soroban-sdk`'s build script
-  will tell you this explicitly if you try the wrong one.)
+  `wasm32-unknown-unknown`.)
 - [`stellar-cli`](https://developers.stellar.org/docs/tools/cli/install-cli)
   (the successor to `soroban-cli`) for `contract deploy` /
   `contract invoke` against testnet/mainnet. **Not installed in the
@@ -606,6 +724,9 @@ Stellar-side problem), so `scripts/deploy.mjs` and `scripts/invoke.mjs`
 (thin wrappers around `@stellar/stellar-sdk`) were used instead to
 perform the same upload → create-contract → initialize flow the CLI
 would otherwise do.
+For payout methods such as `release` and `release_issue`, `invoke.mjs`
+accepts recipient splits as `recipients:<address>=<bps>,<address>=<bps>`
+(for example, `recipients:G...=7000,G...=3000`).
 
 | Contract | Contract ID | Stellar Expert |
 |---|---|---|
@@ -629,30 +750,35 @@ working network access:
 
 ```sh
 stellar keys generate mergefi-admin --network testnet --fund
-stellar contract deploy \
-  --wasm target/wasm32v1-none/release/mergefi_escrow.wasm \
-  --source mergefi-admin \
-  --network testnet
-# then, e.g.
-stellar contract invoke \
-  --id <CONTRACT_ID> --source mergefi-admin --network testnet \
-  -- initialize --admin <ADMIN_G...> --oracle <ORACLE_G...> --treasury <TREASURY_G...> --fee_bps 250 --recovery none
+make deploy-escrow NETWORK=testnet SOURCE_ACCOUNT=mergefi-admin \
+  ADMIN=<ADMIN_G...> ORACLE=<ORACLE_G...> TREASURY=<TREASURY_G...> FEE_BPS=250
 ```
 
-Or, in an environment where the CLI's own network calls are blocked but
-plain Node.js `fetch` works (as was the case here):
+The deploy targets invoke `initialize` after creating the contract and stop
+with an error if initialization fails. Initialization arguments are required
+because the contracts have different optional parameters; the targets use
+`None` for optional sponsor caps and recovery addresses. This is two
+transactions, so production deployments should also verify the resulting
+contract's admin immediately after deployment.
 
 ```sh
-DEPLOYER_SECRET=<SECRET_KEY> node scripts/deploy.mjs target/wasm32v1-none/release/mergefi_escrow.wasm escrow
-INVOKER_SECRET=<SECRET_KEY> node scripts/invoke.mjs <CONTRACT_ID> initialize \
-  address:<ADMIN_G...> address:<TREASURY_G...> u32:250
-node scripts/deploy.mjs <SECRET_KEY> target/wasm32v1-none/release/mergefi_escrow.wasm escrow
-node scripts/invoke.mjs <SECRET_KEY> <CONTRACT_ID> initialize \
-  address:<ADMIN_G...> address:<ORACLE_G...> address:<TREASURY_G...> u32:250 none
+make deploy-escrow NETWORK=testnet SOURCE_ACCOUNT=mergefi-admin \
+  ADMIN=<ADMIN_G...> ORACLE=<ORACLE_G...> TREASURY=<TREASURY_G...> FEE_BPS=250
 ```
+
+### Generated TypeScript bindings
+
+Run `make bindings` to build the three optimized WASM contracts and generate
+the TypeScript clients under `bindings/`. The CI workflow uploads
+`typescript-contract-bindings-<commit-sha>` for every build and attaches
+`typescript-contract-bindings.tar.gz` to published GitHub releases. Backend
+consumers can download that artifact from the corresponding workflow run or
+release; it contains a separate generated npm package for each contract.
 
 Both scripts default to Stellar testnet but can be pointed at other networks
 via environment variables:
+Pass signing keys through `DEPLOYER_SECRET` or `INVOKER_SECRET` environment
+variables; deploy and invoke do not accept secret keys as positional arguments.
 
 ```sh
 RPC_URL=https://soroban-mainnet.stellar.org \
@@ -684,9 +810,12 @@ actions (`pause`, `unpause`, `upgrade`, and key rotation).
 
 `upgrade(new_wasm_hash)` is admin-gated and calls Soroban's
 `env.deployer().update_current_contract_wasm(...)`, preserving the current
-contract address and existing storage. Instance storage includes
-`DataKey::Version`, exposed through `get_version()`, so future versions can
-detect old layouts and run lazy or explicit migrations.
+contract address and existing storage. It does not change
+`DataKey::Version`: after installing the new WASM, call the new code's
+admin-only `migrate(from_version)` entrypoint. The migration rejects an
+unexpected source version and is safe to retry. `get_version()` reports the
+stored schema version; this release migrates existing version-1 instances
+to version 2.
 
 During an incident, admin can call `pause()` to block new deposits/funding
 and oracle-controlled payout paths while leaving refund/recovery-style
@@ -702,9 +831,6 @@ paths available where the contract supports them. See:
 - Extract shared split/fee math (`compute_split`) into a common
   non-contract Rust crate to remove the duplication between
   `mergefi-escrow` and `mergefi-milestones` noted above.
-- Emit contract events (`env.events().publish(...)`) on fund/release/refund
-  so the backend can index state changes from the ledger directly instead
-  of only polling `get_*` view calls.
 - Consider a timelock or multisig-admin wrapper for high-trust operations
   after the two-key contract-level admin/oracle split has been audited.
 - Support partial milestone/pool refunds and issue re-allocation
@@ -742,13 +868,4 @@ and the clearest place to catch accidental double-commitment or invalid
 recipient conditions before they hit the chain.
 
 ## Recent Changes
-- Ongoing improvements and fixes as part of active development.
-- See commit history and open issues for detailed change tracking.
-
-## Recent Changes
-- Ongoing improvements and fixes as part of active development.
-- See commit history and open issues for detailed change tracking.
-
-## Recent Changes
-- Ongoing improvements and fixes as part of active development.
-- See commit history and open issues for detailed change tracking.
+- See [CHANGELOG.md](CHANGELOG.md) for notable behavior changes and release history.

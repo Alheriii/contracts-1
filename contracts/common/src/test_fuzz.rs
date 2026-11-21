@@ -268,14 +268,51 @@ mod tests {
             let result = env.as_contract(&contract_id, || {
                 compute_split(&env, 1_000_000, fee_bps, &recipients)
             });
-            assert!(matches!(result, Err(SplitError::InvalidSplit)));
+            assert!(matches!(result, Err(SplitError::EmptyRecipients)));
         }
 
         // Also rejected for a zero total — emptiness alone is invalid.
         assert!(matches!(
             env.as_contract(&contract_id, || compute_split(&env, 0, 0, &recipients)),
-            Err(SplitError::InvalidSplit)
+            Err(SplitError::EmptyRecipients)
         ));
+    }
+
+    /// `compute_split` must reject a 0-bps recipient even when the remaining
+    /// percentages still sum to 100%.
+    #[test]
+    fn test_zero_bps_recipient_rejected() {
+        use crate::{compute_split, SplitError};
+        use soroban_sdk::{testutils::Address as _, Address, Env, Vec as SorobanVec};
+
+        let env = Env::default();
+        let contract_id = env.register(DummyContract, ());
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        let recipients = SorobanVec::from_array(&env, [(a.clone(), 5_000u32), (b, 0u32), (a.clone(), 5_000u32)]);
+
+        let result = env.as_contract(&contract_id, || {
+            compute_split(&env, 1_000_000, 0, &recipients)
+        });
+        assert!(matches!(result, Err(SplitError::ZeroWeight)));
+    }
+
+    /// Duplicate recipient addresses are invalid because they create multiple
+    /// transfers to the same address and distort indexer accounting.
+    #[test]
+    fn test_duplicate_recipients_rejected() {
+        use crate::{compute_split, SplitError};
+        use soroban_sdk::{testutils::Address as _, Address, Env, Vec as SorobanVec};
+
+        let env = Env::default();
+        let contract_id = env.register(DummyContract, ());
+        let recipient = Address::generate(&env);
+        let recipients = SorobanVec::from_array(&env, [(recipient.clone(), 5_000u32), (recipient, 5_000u32)]);
+
+        let result = env.as_contract(&contract_id, || {
+            compute_split(&env, 1_000_000, 0, &recipients)
+        });
+        assert!(matches!(result, Err(SplitError::DuplicateRecipient)));
     }
 
     /// Sanity counterpart: the real `compute_split` accepts a single
