@@ -343,7 +343,10 @@ mod contract {
                 },
             );
 
-            if actual_received <= 0 {
+            if actual_received < 0 {
+                return Err(Error::DeflationaryTransfer);
+            }
+            if actual_received == 0 {
                 return Err(Error::InvalidAmount);
             }
 
@@ -453,7 +456,10 @@ mod contract {
                 },
             );
 
-            if actual_received <= 0 {
+            if actual_received < 0 {
+                return Err(Error::DeflationaryTransfer);
+            }
+            if actual_received == 0 {
                 return Err(Error::InvalidAmount);
             }
 
@@ -542,7 +548,11 @@ mod contract {
                 mergefi_common::get_fee_bps::<DataKey>(&env).ok_or(Error::NotInitialized)?;
             let payouts = mergefi_common::compute_split(&env, escrow.amount, fee_bps, &recipients)
                 .map_err(|e| match e {
-                    mergefi_common::SplitError::InvalidSplit => Error::InvalidSplit,
+                    mergefi_common::SplitError::EmptyRecipients
+                    | mergefi_common::SplitError::ZeroWeight
+                    | mergefi_common::SplitError::DuplicateRecipient
+                    | mergefi_common::SplitError::WeightMismatch
+                    | mergefi_common::SplitError::InvalidSplit => Error::InvalidSplit,
                     mergefi_common::SplitError::SelfPayout => Error::SelfPayout,
                     mergefi_common::SplitError::TooManyRecipients => Error::TooManyRecipients,
                     mergefi_common::SplitError::Overflow => Error::ArithmeticOverflow,
@@ -845,10 +855,13 @@ mod contract {
 
         /// Returns every contribution recorded for `issue_id` in one call
         /// (issue #145) — `0..escrow.contributor_count`, in the same order
-        /// `get_contribution` exposes individually. Bounded by `MAX_SPONSORS`
-        /// (20), so this is always a small, cheap read: replaces up to 20
-        /// separate simulated RPC calls (one per `get_contribution` index) with
-        /// one for the common "show me who funded this bounty" UI case.
+        /// `get_contribution` exposes individually. Bounded by the
+        /// `max_sponsors` value set at `initialize` (default `MAX_SPONSORS`,
+        /// 20; at most `MAX_SPONSORS_LIMIT`, 50), so it reads at most 51
+        /// ledger entries (the escrow plus one per contribution): replaces up
+        /// to that many separate simulated RPC calls (one per
+        /// `get_contribution` index) with one for the common "show me who
+        /// funded this bounty" UI case.
         pub fn get_contributions(env: Env, issue_id: u64) -> Result<Vec<Contribution>, Error> {
             let escrow: Escrow = env
                 .storage()
@@ -868,8 +881,11 @@ mod contract {
             Ok(contributions)
         }
 
-        /// Pause the contract, blocking new `fund`, `contribute`, `release`, and
-        /// `extend_deadline` calls. Refunds remain available so users can exit.
+        /// Pause the contract. Blocked calls: `fund`, `contribute`, `release`.
+        /// Still available while paused: `refund` (users can always exit),
+        /// `extend_deadline`, `keep_alive`, all `get_*` views, `unpause`,
+        /// `set_admin`, `set_oracle`, `set_treasury`, `set_fee_bps`,
+        /// `recover_admin`, `migrate`, and `upgrade`.
         /// Only callable by the admin. See docs/pause-circuit-breaker-design.md.
         pub fn pause(env: Env) -> Result<(), Error> {
             let admin = require_admin(&env)?;
