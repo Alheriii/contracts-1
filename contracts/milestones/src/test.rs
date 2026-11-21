@@ -1912,3 +1912,70 @@ fn test_release_issue_with_admin_as_recipient() {
     let distributable = 950_0000000i128; // after 5% fee
     assert_eq!(token_client.balance(&admin), distributable);
 }
+
+// ── get_allocation (#802) ─────────────────────────────────────────────────────
+
+#[test]
+fn test_get_allocation_returns_allocated_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &5_000_000_000i128);
+
+    client.create_milestone(&800u64, &sponsor, &token_addr, &5_000_000_000i128, &1_000u64);
+    client.allocate(&800u64, &8001u64, &1_500_000_000i128);
+
+    let amount = client.get_allocation(&800u64, &8001u64);
+    assert_eq!(amount, 1_500_000_000i128);
+}
+
+#[test]
+fn test_get_allocation_returns_issue_not_allocated_for_unknown_issue() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &1_000_000_000i128);
+
+    client.create_milestone(&801u64, &sponsor, &token_addr, &1_000_000_000i128, &1_000u64);
+
+    let err = client.try_get_allocation(&801u64, &9999u64);
+    assert_eq!(err, Err(Ok(Error::IssueNotAllocated)));
+}
+
+#[test]
+fn test_get_allocation_returns_milestone_not_found_for_unknown_milestone() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    let err = client.try_get_allocation(&99999u64, &1u64);
+    assert_eq!(err, Err(Ok(Error::MilestoneNotFound)));
+}
+
+#[test]
+fn test_get_allocation_reflects_updated_amount_after_second_allocate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000_000_000i128);
+
+    client.create_milestone(&802u64, &sponsor, &token_addr, &10_000_000_000i128, &1_000u64);
+    client.allocate(&802u64, &8021u64, &2_000_000_000i128);
+    assert_eq!(client.get_allocation(&802u64, &8021u64), 2_000_000_000i128);
+
+    // A second allocate on the same issue replaces the amount.
+    client.allocate(&802u64, &8021u64, &3_500_000_000i128);
+    assert_eq!(client.get_allocation(&802u64, &8021u64), 3_500_000_000i128);
+}

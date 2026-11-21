@@ -751,6 +751,28 @@ mod contract {
             .ok_or(Error::IssueNotAllocated)
     }
 
+    /// Returns the token amount allocated to `issue_id` within `milestone_id`.
+    ///
+    /// Unlike `get_milestone`, this is a cheap single-entry read: it fetches
+    /// only the milestone record to look up the allocation map entry, so the
+    /// cost does not scale with the number of other issues in the milestone.
+    /// Returns `IssueNotAllocated` when no allocation exists for that issue.
+    pub fn get_allocation(
+        env: Env,
+        milestone_id: u64,
+        issue_id: u64,
+    ) -> Result<i128, Error> {
+        let milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(milestone_id))
+            .ok_or(Error::MilestoneNotFound)?;
+        milestone
+            .allocations
+            .get(issue_id)
+            .ok_or(Error::IssueNotAllocated)
+    }
+
     /// Returns the `index`-th contribution recorded for `milestone_id`
     /// (`0` is always the original `create_milestone` caller; subsequent
     /// indices are `contribute` calls in the order they were accepted),
