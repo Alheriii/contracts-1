@@ -477,6 +477,10 @@ mod contract {
         /// - The caller is not the deposit's original sponsor
         /// - The inactivity window hasn't elapsed since the last withdrawal
         /// - The pro-rata share of the current pool balance rounds to zero
+        ///
+        /// Intentionally **not blocked** while paused, as it is a
+        /// sponsor-protective operation that moves funds back toward refund
+        /// paths (see docs/pause-circuit-breaker-design.md principle 1).
         pub fn reclaim_deposit(
             env: Env,
             pool_id: u64,
@@ -634,6 +638,10 @@ mod contract {
         /// * `token` - The token contract to query balance from.
         /// * `recipient` - Address to send swept tokens to (typically treasury, but
         ///   admin-controlled for flexibility).
+        ///
+        /// Intentionally **not blocked** while paused, as it is an admin
+        /// recovery operation that drains stranded funds (see
+        /// docs/pause-circuit-breaker-design.md principle 1).
         pub fn sweep(
             env: Env,
             pool_id: u64,
@@ -713,47 +721,47 @@ mod contract {
             is_paused(&env)
         }
 
-    /// Upgrade the contract's wasm code. Requires admin authorization.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        admin.require_auth();
+        /// Upgrade the contract's wasm code. Requires admin authorization.
+        pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+            let admin = require_admin(&env)?;
+            admin.require_auth();
 
-        env.deployer()
-            .update_current_contract_wasm(new_wasm_hash.clone());
-        extend_instance_ttl(&env);
-        ContractUpgraded {
-            admin,
-            wasm_hash: new_wasm_hash,
-            version: CONTRACT_VERSION,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
-    /// Apply storage migrations through this code version. Call after
-    /// `upgrade`; an already-migrated contract accepts a retry.
-    pub fn migrate(env: Env, from_version: u32) -> Result<(), Error> {
-        require_admin(&env)?.require_auth();
-
-        let current_version = env
-            .storage()
-            .instance()
-            .get::<_, u32>(&DataKey::Version)
-            .unwrap_or(0);
-        if current_version == CONTRACT_VERSION {
+            env.deployer()
+                .update_current_contract_wasm(new_wasm_hash.clone());
             extend_instance_ttl(&env);
-            return Ok(());
-        }
-        if current_version != from_version || from_version >= CONTRACT_VERSION {
-            return Err(Error::InvalidVersion);
+            ContractUpgraded {
+                admin,
+                wasm_hash: new_wasm_hash,
+                version: CONTRACT_VERSION,
+            }
+            .publish(&env);
+            Ok(())
         }
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Version, &CONTRACT_VERSION);
-        extend_instance_ttl(&env);
-        Ok(())
-    }
+        /// Apply storage migrations through this code version. Call after
+        /// `upgrade`; an already-migrated contract accepts a retry.
+        pub fn migrate(env: Env, from_version: u32) -> Result<(), Error> {
+            require_admin(&env)?.require_auth();
+
+            let current_version = env
+                .storage()
+                .instance()
+                .get::<_, u32>(&DataKey::Version)
+                .unwrap_or(0);
+            if current_version == CONTRACT_VERSION {
+                extend_instance_ttl(&env);
+                return Ok(());
+            }
+            if current_version != from_version || from_version >= CONTRACT_VERSION {
+                return Err(Error::InvalidVersion);
+            }
+
+            env.storage()
+                .instance()
+                .set(&DataKey::Version, &CONTRACT_VERSION);
+            extend_instance_ttl(&env);
+            Ok(())
+        }
 
         /// Returns the maintenance pool record for `pool_id`.
         pub fn get_pool(env: Env, pool_id: u64) -> Result<MaintenancePool, Error> {
@@ -769,6 +777,38 @@ mod contract {
                 .persistent()
                 .get(&DataKey::Deposit(pool_id, index))
                 .ok_or(Error::DepositNotFound)
+        }
+
+        /// Returns the slot index of `sponsor`'s existing deposit in `pool_id`,
+        /// or `None` if the sponsor has no deposit (#820).
+        ///
+        /// Clients use this to answer two questions in one read:
+        /// - Is this sponsor already in the pool? (existing sponsors can always
+        ///   top up even at capacity.)
+        /// - Would a *new* deposit be rejected with `TooManyDeposits`?
+        ///   (`None` + `pool.deposit_count >= MAX_DEPOSITS` → yes)
+        pub fn get_deposit_index(
+            env: Env,
+            pool_id: u64,
+            sponsor: Address,
+        ) -> Result<Option<u32>, Error> {
+            let pool: MaintenancePool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Pool(pool_id))
+                .ok_or(Error::PoolNotFound)?;
+            for i in 0..pool.deposit_count {
+                if let Some(deposit) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, Deposit>(&DataKey::Deposit(pool_id, i))
+                {
+                    if deposit.sponsor == sponsor {
+                        return Ok(Some(i));
+                    }
+                }
+            }
+            Ok(None)
         }
 
         /// Returns the admin address stored in instance storage.

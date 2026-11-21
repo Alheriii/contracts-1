@@ -133,6 +133,13 @@ where
 /// an approximate ledger count. Not a protocol constant — the network's
 /// actual average could drift — but the order of magnitude is what matters
 /// here, not sub-day precision. See `extend_ttl_for_target`'s docs.
+///
+/// **This constant must be rounded DOWN from the real close time (≈5.5–6 s).**
+/// `extend_ttl_for_target` divides by it, so a smaller divisor yields a larger
+/// ledger count — an over-estimate — which is the safe side: the entry lives
+/// slightly longer than needed. A value *above* the real close time would
+/// under-estimate ledger counts and allow entries to archive before their
+/// deadlines with no visible symptom until a refund or reclaim fails.
 const APPROX_SECONDS_PER_LEDGER: u64 = 5;
 
 /// ~5.8 days of remaining lifetime at the approximate 5-second ledger close time.
