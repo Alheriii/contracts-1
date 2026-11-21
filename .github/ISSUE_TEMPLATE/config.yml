@@ -1,0 +1,17 @@
+# Disabling blank issues forces every reporter through a template, so the
+# structured fields (reproduction steps, contract location, test gap) are
+# always present. It also surfaces the security-advisory link prominently,
+# so vulnerability reporters see the private-disclosure path before they
+# can accidentally open a public bug report (#869).
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/MergeFi/contracts/security/advisories/new
+    about: >
+      Do not open a public issue for security vulnerabilities.
+      Use GitHub's private Security Advisory feature so the report
+      reaches maintainers without being publicly visible.
+  - name: MergeFi documentation
+    url: https://github.com/MergeFi/contracts#readme
+    about: Read the README and inline contract docs before filing a bug.

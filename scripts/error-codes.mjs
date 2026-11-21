@@ -1,6 +1,11 @@
 /**
  * Error code mappings for Soroban contracts.
+ * Hand-maintained alongside contracts/*/src/error.rs — keep in sync.
+ * Run `node --test scripts/error-codes.test.mjs` to verify parity (#858).
  * Generated from contract error.rs files.
+ *
+ * Tests: scripts/error-codes.test.mjs (#855)
+ * Run:   node --test scripts/error-codes.test.mjs
  */
 
 export const errorMappings = {
@@ -24,49 +29,64 @@ export const errorMappings = {
     16: "InvalidTarget",
     17: "InvalidTreasury",
     19: "ContractPaused",
-    20: "SelfPayout"
+    20: "SelfPayout",
+    21: "ArithmeticOverflow",
+    22: "InvalidVersion",
+    23: "InvalidMaxSponsors",
+    24: "TooManyRecipients"
   },
   
   // Milestones contract errors
   milestones: {
     1: "AlreadyInitialized",
     2: "NotInitialized",
-    3: "Unauthorized",
-    4: "MilestoneNotFound",
-    5: "IssueAlreadyAllocated",
-    6: "IssueNotAllocated",
-    7: "IssueAlreadyReleased",
-    8: "OverAllocation",
-    9: "InvalidSplit",
-    10: "InvalidAmount",
-    11: "InvalidFee",
-    12: "MilestoneClosed",
-    13: "TooManySponsors",
-    14: "InvalidTreasury",
-    15: "MilestoneAlreadyExists",
-    16: "DeadlineNotPassed",
-    17: "IssueNotAllocatedForDeallocate",
-    18: "ContractPaused",
-    19: "ContributionNotFound",
-    20: "SelfPayout"
+    3: "MilestoneNotFound",
+    4: "IssueAlreadyAllocated",
+    5: "IssueNotAllocated",
+    6: "IssueAlreadyReleased",
+    7: "OverAllocation",
+    8: "InvalidSplit",
+    9: "InvalidAmount",
+    10: "InvalidFee",
+    11: "MilestoneClosed",
+    12: "TooManySponsors",
+    13: "InvalidTreasury",
+    14: "MilestoneAlreadyExists",
+    15: "DeadlineNotPassed",
+    16: "IssueNotAllocatedForDeallocate",
+    17: "ContractPaused",
+    18: "ContributionNotFound",
+    19: "SelfPayout",
+    20: "ArithmeticOverflow",
+    21: "DeadlinePassed",
+    22: "DeadlineInPast",
+    23: "InvalidVersion",
+    24: "InvalidMaxSponsors",
+    25: "TooManyRecipients"
   },
-  
+
   // Maintenance-pool contract errors
   maintenancePool: {
     1: "AlreadyInitialized",
     2: "NotInitialized",
-    3: "Unauthorized",
-    4: "PoolNotFound",
-    5: "TokenMismatch",
-    6: "InvalidAmount",
-    7: "InsufficientBalance",
-    8: "InvalidFee",
-    9: "InvalidTreasury",
-    10: "InactivityWindowNotElapsed",
-    11: "NotDepositSponsor",
-    12: "DepositNotFound",
-    13: "ContractPaused",
-    14: "DepositCountOverflow"
+    3: "PoolNotFound",
+    4: "TokenMismatch",
+    5: "InvalidAmount",
+    6: "InsufficientBalance",
+    7: "InvalidFee",
+    8: "InvalidTreasury",
+    9: "InactivityWindowNotElapsed",
+    10: "NotDepositSponsor",
+    11: "DepositNotFound",
+    12: "ContractPaused",
+    13: "DepositCountOverflow",
+    14: "TooManyDeposits",
+    15: "AlreadyReclaimed",
+    16: "ArithmeticOverflow",
+    17: "InvalidSplit",
+    18: "SelfPayout",
+    19: "InvalidVersion",
+    20: "TooManyRecipients"
   }
 };
 
@@ -98,11 +118,10 @@ export function extractErrorCode(error) {
     }
     
     // Pattern 2: Look for error codes in strings like "error: 5" or "code: 5"
-    const match = error.match(/error\s*code\s*[:=]?\s*(\d+)/i) || 
+    const match = error.match(/error\s*code\s*[:=]?\s*(\d+)/i) ||
                   error.match(/\bcode\s*[:=]?\s*(\d+)/i) ||
                   error.match(/\berror\s*[:=]?\s*(\d+)/i) ||
-                  error.match(/\bvalue\s*[:=]?\s*(\d+)/i) ||
-                  error.match(/\b(\d+)\b/);
+                  error.match(/\bvalue\s*[:=]?\s*(\d+)/i);
     if (match) {
       return parseInt(match[1], 10);
     }
@@ -172,12 +191,6 @@ export function extractErrorCode(error) {
     if (jsonMatch) {
       return parseInt(jsonMatch[1], 10);
     }
-    
-    // General number extraction as fallback
-    const match = str.match(/\b(\d+)\b/);
-    if (match) {
-      return parseInt(match[1], 10);
-    }
   } catch (e) {
     // Ignore JSON stringify errors
   }
@@ -207,11 +220,17 @@ export function decodeErrorCode(errorCode) {
 /**
  * Format error with decoded meanings if available.
  * @param {any} error - The original error object
+ * @param {string} [contractName] - Optional contract name to narrow the decoded meanings
  * @returns {string} - Formatted error message with decoding
  */
-export function formatError(error) {
+export function formatError(error, contractName) {
   const errorCode = extractErrorCode(error);
-  const decoded = decodeErrorCode(errorCode);
+  const allDecoded = decodeErrorCode(errorCode);
+  // When a contract name is supplied narrow to that contract's entry so the
+  // caller isn't shown irrelevant meanings from sibling contracts.
+  const decoded = contractName
+    ? allDecoded.filter((m) => m.startsWith(contractName + ":"))
+    : allDecoded;
   
   let message = '';
   

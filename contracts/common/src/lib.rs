@@ -15,6 +15,10 @@ pub use split::{compute_split, sort_remainders_desc, Payouts, SplitError};
 #[cfg(test)]
 mod test_fuzz;
 
+/// Maximum accepted per-contract sponsor cap. This keeps contributor loops
+/// within a predictable resource budget even when deployments customize it.
+pub const MAX_SPONSORS_LIMIT: u32 = 50;
+
 /// Trait to identify the Admin key for a contract's DataKey enum.
 pub trait AdminKey {
     /// Returns the storage key for the admin address.
@@ -77,6 +81,9 @@ pub const BPS_DENOMINATOR: i128 = 10_000;
 /// Maximum number of distinct contributors allowed per escrow or milestone.
 pub const MAX_SPONSORS: u32 = 20;
 
+/// Maximum number of recipients allowed in a payout split.
+pub const MAX_RECIPIENTS: u32 = 20;
+
 /// Maximum allowed single-step fee change (basis points) - Issue #20
 /// Prevents accidental or malicious fee spikes (e.g., 2.5% to 99%)
 pub const MAX_FEE_CHANGE_BPS: u32 = 500; // 5% maximum change per call
@@ -125,6 +132,9 @@ where
     K: IntoVal<Env, Val>,
 {
     env.storage().persistent().extend_ttl(key, 100_000, PERSISTENT_TTL_EXTEND_TO);
+    env.storage()
+        .persistent()
+        .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
 }
 
 /// Stellar's approximate ledger close time, used to convert a duration into
@@ -132,6 +142,24 @@ where
 /// actual average could drift — but the order of magnitude is what matters
 /// here, not sub-day precision. See `extend_ttl_for_target`'s docs.
 const APPROX_SECONDS_PER_LEDGER: u64 = 5;
+
+/// ~5.8 days of remaining lifetime at the approximate 5-second ledger close time.
+const PERSISTENT_TTL_THRESHOLD: u32 = 100_000;
+/// ~29 days of lifetime at the approximate 5-second ledger close time.
+const PERSISTENT_TTL_EXTEND_TO: u32 = 500_000;
+/// ~5.8 days of remaining instance-storage lifetime at ~5 seconds per ledger.
+const INSTANCE_TTL_THRESHOLD: u32 = 100_000;
+/// ~29 days of instance-storage lifetime at ~5 seconds per ledger.
+const INSTANCE_TTL_EXTEND_TO: u32 = 500_000;
+
+/// Extends the contract instance-storage TTL using the same threshold and
+/// target as persistent entries. At the approximate 5-second ledger close
+/// time, these values represent ~5.8 days and ~29 days, respectively.
+pub fn extend_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+}
 
 /// Measures the actual balance delta from a token transfer operation,
 /// protecting against fee-on-transfer tokens, rebasing tokens, and malicious
@@ -168,11 +196,12 @@ where
     let balance_before = token_client.balance(contract_addr);
     operation();
     let balance_after = token_client.balance(contract_addr);
-    // A malicious or deflationary token could leave `balance_after <
-    // balance_before`; a plain `-` would panic (abort) under
-    // `overflow-checks = true`. Saturate at 0: callers already reject
-    // `actual_received <= 0` with `InvalidAmount`.
-    balance_after.saturating_sub(balance_before)
+    // Return the true signed delta. A deflationary / fee-on-transfer token can
+    // leave `balance_after < balance_before` (negative delta). Callers must
+    // distinguish that case (Error::DeflationaryTransfer) from a legitimately
+    // zero amount (Error::InvalidAmount). Previously this saturated at 0, which
+    // collapsed both situations into the same error (#830).
+    balance_after - balance_before
 }
 
 /// Extends a persistent entry's TTL to (approximately) survive until
