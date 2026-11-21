@@ -1104,9 +1104,12 @@ mod contract {
 
         /// Admin-only: rotate the routine oracle key.
         pub fn set_oracle(env: Env, new_oracle: Address) -> Result<(), Error> {
-            let old_oracle = require_oracle(&env)?;
+            // Authorization must be checked before any storage reads so that an
+            // uninitialized or half-initialized contract always fails with an auth
+            // error rather than leaking state information (#799).
             require_admin(&env)?.require_auth();
             new_oracle.require_auth();
+            let old_oracle = require_oracle(&env)?;
             env.storage().instance().set(&DataKey::Oracle, &new_oracle);
             extend_instance_ttl(&env);
             OracleChanged {
