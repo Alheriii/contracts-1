@@ -63,6 +63,16 @@ mod contract {
 
     #[contractevent]
     #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PoolCreated {
+        #[topic]
+        pub pool_id: u64,
+        #[topic]
+        pub creator: Address,
+        pub token: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct PoolDeposited {
         #[topic]
         pub pool_id: u64,
@@ -234,9 +244,49 @@ mod contract {
             Ok(())
         }
 
-        /// Sponsor deposits `amount` of `token` into the pool identified by
-        /// `pool_id` (an off-chain-assigned id for a repo/org). Creates the
-        /// pool on first deposit; subsequent deposits must use the same token.
+        /// Explicitly create the pool for `pool_id` before accepting deposits.
+        ///
+        /// A pool must be created with an explicit `create_pool` call before
+        /// it can receive deposits. This prevents a typo'd `pool_id` from
+        /// silently funding a brand-new pool instead of the intended one (#812).
+        /// Requires creator authorization.
+        pub fn create_pool(
+            env: Env,
+            pool_id: u64,
+            creator: Address,
+            token: Address,
+        ) -> Result<(), Error> {
+            if is_paused(&env) {
+                return Err(Error::ContractPaused);
+            }
+
+            creator.require_auth();
+
+            let pkey = DataKey::Pool(pool_id);
+            if env.storage().persistent().has(&pkey) {
+                return Err(Error::PoolAlreadyExists);
+            }
+
+            let pool = MaintenancePool {
+                token: token.clone(),
+                balance: 0,
+                total_deposited: 0,
+                total_withdrawn: 0,
+                created_at: env.ledger().timestamp(),
+                deposit_count: 0,
+                last_withdraw_at: 0,
+            };
+            env.storage().persistent().set(&pkey, &pool);
+            extend_ttl(&env, &pkey);
+            extend_instance_ttl(&env);
+            PoolCreated { pool_id, creator, token }.publish(&env);
+            Ok(())
+        }
+
+        /// Sponsor deposits `amount` of `token` into an existing pool identified by
+        /// `pool_id`. The pool must have been created via `create_pool` first;
+        /// depositing into an unknown pool_id returns `PoolNotFound` (#812).
+        /// Subsequent deposits must use the same token as the pool was created with.
         /// Requires sponsor authorization. Every deposit is recorded so the
         /// full contribution history can be queried.
         pub fn deposit(
@@ -257,18 +307,11 @@ mod contract {
             }
 
             let pkey = DataKey::Pool(pool_id);
-            let mut pool: MaintenancePool = match env.storage().persistent().get(&pkey) {
-                Some(p) => p,
-                None => MaintenancePool {
-                    token: token.clone(),
-                    balance: 0,
-                    total_deposited: 0,
-                    total_withdrawn: 0,
-                    created_at: env.ledger().timestamp(),
-                    deposit_count: 0,
-                    last_withdraw_at: 0,
-                },
-            };
+            let mut pool: MaintenancePool = env
+                .storage()
+                .persistent()
+                .get(&pkey)
+                .ok_or(Error::PoolNotFound)?;
 
             if pool.deposit_count > 0 && pool.token != token {
                 return Err(Error::TokenMismatch);
@@ -401,11 +444,33 @@ mod contract {
                 return Err(Error::InsufficientBalance);
             }
 
+            // Per-call withdraw cap: a single call cannot withdraw more than
+            // `cap_bps / 10_000` of the current pool balance (#815). Guards
+            // against a compromised oracle draining the pool in one transaction.
+            if let Some(cap_bps) = env
+                .storage()
+                .instance()
+                .get::<_, u32>(&DataKey::WithdrawCapBps)
+            {
+                let cap_amount = pool
+                    .balance
+                    .checked_mul(cap_bps as i128)
+                    .ok_or(Error::ArithmeticOverflow)?
+                    / BPS_DENOMINATOR;
+                if amount > cap_amount {
+                    return Err(Error::WithdrawCapExceeded);
+                }
+            }
+
             let fee_bps: u32 =
                 mergefi_common::get_fee_bps::<DataKey>(&env).ok_or(Error::NotInitialized)?;
             let payouts = mergefi_common::compute_split(&env, amount, fee_bps, &recipients)
                 .map_err(|e| match e {
-                    mergefi_common::SplitError::InvalidSplit => Error::InvalidSplit,
+                    mergefi_common::SplitError::EmptyRecipients
+                    | mergefi_common::SplitError::ZeroWeight
+                    | mergefi_common::SplitError::DuplicateRecipient
+                    | mergefi_common::SplitError::WeightMismatch
+                    | mergefi_common::SplitError::InvalidSplit => Error::InvalidSplit,
                     mergefi_common::SplitError::SelfPayout => Error::SelfPayout,
                     mergefi_common::SplitError::TooManyRecipients => Error::TooManyRecipients,
                     mergefi_common::SplitError::Overflow => Error::ArithmeticOverflow,
@@ -532,11 +597,32 @@ mod contract {
                     .ok_or(Error::ArithmeticOverflow)?;
             }
 
-            let transfer_amount = pool
-                .balance
-                .checked_mul(deposit.amount)
-                .ok_or(Error::ArithmeticOverflow)?
-                / total_unreclaimed;
+            // If this sponsor holds the only remaining (non-zero) deposit, give
+            // them the entire pool balance rather than the rounded-down pro-rata
+            // share. This prevents integer division from locking a dust remainder
+            // in the contract permanently (#814).
+            let is_sole_remaining = {
+                let mut nonzero_count = 0u32;
+                for index in 0..pool.deposit_count {
+                    let d: Deposit = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::Deposit(pool_id, index))
+                        .ok_or(Error::DepositNotFound)?;
+                    if d.amount > 0 {
+                        nonzero_count += 1;
+                    }
+                }
+                nonzero_count == 1
+            };
+            let transfer_amount = if is_sole_remaining {
+                pool.balance
+            } else {
+                pool.balance
+                    .checked_mul(deposit.amount)
+                    .ok_or(Error::ArithmeticOverflow)?
+                    / total_unreclaimed
+            };
             if transfer_amount == 0 {
                 return Err(Error::InsufficientBalance);
             }
@@ -885,6 +971,41 @@ mod contract {
             }
             .publish(&env);
             Ok(())
+        }
+
+        /// Admin-only: set or clear the per-call withdraw cap (#815).
+        ///
+        /// `cap_bps` is a basis-point fraction of the pool's current balance.
+        /// For example, `2500` means a single `withdraw` call cannot exceed
+        /// 25% of the pool balance. Pass `None` to remove the cap entirely.
+        /// Rejects values above `BPS_DENOMINATOR` (10 000 = 100%).
+        pub fn set_withdraw_cap(env: Env, cap_bps: Option<u32>) -> Result<(), Error> {
+            require_admin(&env)?.require_auth();
+            match cap_bps {
+                Some(bps) => {
+                    if bps as i128 > BPS_DENOMINATOR {
+                        return Err(Error::InvalidFee);
+                    }
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::WithdrawCapBps, &bps);
+                }
+                None => {
+                    env.storage()
+                        .instance()
+                        .remove(&DataKey::WithdrawCapBps);
+                }
+            }
+            extend_instance_ttl(&env);
+            Ok(())
+        }
+
+        /// Returns the current per-call withdraw cap in basis points, or `None`
+        /// if no cap is configured.
+        pub fn get_withdraw_cap(env: Env) -> Option<u32> {
+            env.storage()
+                .instance()
+                .get(&DataKey::WithdrawCapBps)
         }
     }
 } // mod contract
