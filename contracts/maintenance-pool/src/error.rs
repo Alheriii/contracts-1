@@ -41,4 +41,8 @@ pub enum Error {
     InvalidVersion = 19,
     /// The payout recipient list exceeds `MAX_RECIPIENTS`.
     TooManyRecipients = 20,
+    /// A `create_pool` call was made for a pool that already exists (#812).
+    PoolAlreadyExists = 21,
+    /// A single `withdraw` call would exceed the per-call withdraw cap (#815).
+    WithdrawCapExceeded = 22,
 }
