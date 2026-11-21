@@ -23,7 +23,7 @@ use soroban_sdk::{contract, contractevent, contractimpl, token, Address, BytesN,
 use types::{Contribution, DataKey, IssueStatus, Milestone};
 
 use mergefi_common::{
-    extend_instance_ttl, BPS_DENOMINATOR, MAX_SPONSORS, MAX_SPONSORS_LIMIT,
+    extend_instance_ttl, BPS_DENOMINATOR, MAX_ALLOCATIONS, MAX_SPONSORS, MAX_SPONSORS_LIMIT,
 };
 
 /// Minimum grace period (in seconds) after the deadline before anyone can
@@ -576,6 +576,9 @@ mod contract {
 
             if milestone.allocations.contains_key(issue_id) {
                 return Err(Error::IssueAlreadyAllocated);
+            }
+            if milestone.allocations.len() >= MAX_ALLOCATIONS {
+                return Err(Error::TooManyAllocations);
             }
             if amount > milestone.remaining_budget {
                 return Err(Error::OverAllocation);
