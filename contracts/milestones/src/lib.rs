@@ -1028,6 +1028,44 @@ mod contract {
                 .ok_or(Error::NotInitialized)
         }
 
+    /// Returns the token amount allocated to `issue_id` within `milestone_id`.
+    ///
+    /// Unlike `get_milestone`, this is a cheap single-entry read: it fetches
+    /// only the milestone record to look up the allocation map entry, so the
+    /// cost does not scale with the number of other issues in the milestone.
+    /// Returns `IssueNotAllocated` when no allocation exists for that issue.
+    pub fn get_allocation(
+        env: Env,
+        milestone_id: u64,
+        issue_id: u64,
+    ) -> Result<i128, Error> {
+        let milestone: Milestone = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Milestone(milestone_id))
+            .ok_or(Error::MilestoneNotFound)?;
+        milestone
+            .allocations
+            .get(issue_id)
+            .ok_or(Error::IssueNotAllocated)
+    }
+
+    /// Returns the `index`-th contribution recorded for `milestone_id`
+    /// (`0` is always the original `create_milestone` caller; subsequent
+    /// indices are `contribute` calls in the order they were accepted),
+    /// letting off-chain callers enumerate the full contribution ledger
+    /// via `0..milestone.contributor_count`.
+    pub fn get_contribution(
+        env: Env,
+        milestone_id: u64,
+        index: u32,
+    ) -> Result<Contribution, Error> {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Milestone(milestone_id))
+        {
+            return Err(Error::MilestoneNotFound);
         /// Returns the treasury address stored in instance storage.
         pub fn get_treasury(env: Env) -> Result<Address, Error> {
             mergefi_common::require_treasury::<DataKey>(&env).ok_or(Error::NotInitialized)
