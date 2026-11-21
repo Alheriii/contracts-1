@@ -1441,6 +1441,42 @@ fn test_sweep_rejects_contract_as_recipient() {
     assert_eq!(err, Err(Ok(Error::InvalidTreasury)));
 }
 
+// ── Regression #838: withdraw must reject the contract's own address as recipient
+
+#[test]
+fn test_withdraw_rejects_contract_as_recipient_with_self_payout() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    let contract_addr = client.address.clone();
+
+    asset_client.mint(&sponsor, &1_000_0000000i128);
+    client.deposit(&401u64, &sponsor, &token_addr, &1_000_0000000i128);
+
+    // Naming the contract itself as a recipient (alongside a legitimate one)
+    // must be rejected before any funds move.
+    let maintainer = Address::generate(&env);
+    let recipients = vec![
+        &env,
+        (contract_addr.clone(), 5_000u32),
+        (maintainer.clone(), 5_000u32),
+    ];
+    let err = client.try_withdraw(&401u64, &recipients, &200_0000000i128);
+    assert_eq!(err, Err(Ok(Error::SelfPayout)));
+
+    // Pool bookkeeping and token balances are untouched.
+    let pool = client.get_pool(&401u64);
+    assert_eq!(pool.balance, 1_000_0000000i128);
+    assert_eq!(pool.total_withdrawn, 0i128);
+    assert_eq!(token_client.balance(&contract_addr), 1_000_0000000i128);
+    assert_eq!(token_client.balance(&maintainer), 0i128);
+    assert_eq!(token_client.balance(&treasury), 0i128);
+}
+
 // ── Regression #249: set_admin ───────────────────────────────────────────────
 
 #[test]

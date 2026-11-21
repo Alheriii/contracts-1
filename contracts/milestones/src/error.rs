@@ -51,4 +51,7 @@ pub enum Error {
     /// `allocate` was called on a milestone that already has `MAX_ALLOCATIONS`
     /// issue entries in its `allocations` Map (#797).
     TooManyAllocations = 26,
+    /// The token took a fee on transfer so the contract received less than zero
+    /// (deflationary / fee-on-transfer token reduced the contract balance).
+    DeflationaryTransfer = 26,
 }
