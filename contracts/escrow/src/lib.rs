@@ -868,8 +868,11 @@ mod contract {
             Ok(contributions)
         }
 
-        /// Pause the contract, blocking new `fund`, `contribute`, `release`, and
-        /// `extend_deadline` calls. Refunds remain available so users can exit.
+        /// Pause the contract. Blocked calls: `fund`, `contribute`, `release`.
+        /// Still available while paused: `refund` (users can always exit),
+        /// `extend_deadline`, `keep_alive`, all `get_*` views, `unpause`,
+        /// `set_admin`, `set_oracle`, `set_treasury`, `set_fee_bps`,
+        /// `recover_admin`, `migrate`, and `upgrade`.
         /// Only callable by the admin. See docs/pause-circuit-breaker-design.md.
         pub fn pause(env: Env) -> Result<(), Error> {
             let admin = require_admin(&env)?;

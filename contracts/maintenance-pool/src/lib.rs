@@ -685,8 +685,10 @@ mod contract {
             Ok(surplus)
         }
 
-        /// Pause the contract, blocking new deposits and routine withdrawals.
-        /// Reclaim and sweep paths remain available for recovery.
+        /// Pause the contract. Blocked calls: `deposit`, `withdraw`.
+        /// Still available while paused: `reclaim_deposit`, `sweep`,
+        /// `keep_alive`, all `get_*` views, `unpause`, `set_admin`,
+        /// `set_oracle`, `set_treasury`, `recover_admin`, `migrate`, `upgrade`.
         pub fn pause(env: Env) -> Result<(), Error> {
             let admin = require_admin(&env)?;
             admin.require_auth();
