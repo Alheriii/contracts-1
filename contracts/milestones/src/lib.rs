@@ -1199,8 +1199,10 @@ mod contract {
 
         /// Returns every contribution recorded for `milestone_id` in one call
         /// (issue #146) — `0..milestone.contributor_count`, in the same order
-        /// `get_contribution` exposes individually. Bounded by `MAX_SPONSORS`
-        /// (20), so this is always a small, cheap read.
+        /// `get_contribution` exposes individually. Bounded by the
+        /// `max_sponsors` value set at `initialize` (default `MAX_SPONSORS`,
+        /// 20; at most `MAX_SPONSORS_LIMIT`, 50), so it reads at most 51
+        /// ledger entries (the milestone plus one per contribution).
         pub fn get_contributions(env: Env, milestone_id: u64) -> Result<Vec<Contribution>, Error> {
             let milestone = Self::get_milestone(env.clone(), milestone_id)?;
             let mut contributions = Vec::new(&env);

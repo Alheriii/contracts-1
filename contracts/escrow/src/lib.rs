@@ -855,10 +855,13 @@ mod contract {
 
         /// Returns every contribution recorded for `issue_id` in one call
         /// (issue #145) — `0..escrow.contributor_count`, in the same order
-        /// `get_contribution` exposes individually. Bounded by `MAX_SPONSORS`
-        /// (20), so this is always a small, cheap read: replaces up to 20
-        /// separate simulated RPC calls (one per `get_contribution` index) with
-        /// one for the common "show me who funded this bounty" UI case.
+        /// `get_contribution` exposes individually. Bounded by the
+        /// `max_sponsors` value set at `initialize` (default `MAX_SPONSORS`,
+        /// 20; at most `MAX_SPONSORS_LIMIT`, 50), so it reads at most 51
+        /// ledger entries (the escrow plus one per contribution): replaces up
+        /// to that many separate simulated RPC calls (one per
+        /// `get_contribution` index) with one for the common "show me who
+        /// funded this bounty" UI case.
         pub fn get_contributions(env: Env, issue_id: u64) -> Result<Vec<Contribution>, Error> {
             let escrow: Escrow = env
                 .storage()

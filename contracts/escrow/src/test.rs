@@ -2368,6 +2368,42 @@ fn test_get_contributions_single_sponsor() {
     assert_eq!(contributions.get(0).unwrap().sponsor, sponsor);
 }
 
+#[test]
+fn test_get_contributions_at_max_sponsors_limit_fits_default_budget() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+    client.initialize(
+        &admin,
+        &oracle,
+        &treasury,
+        &500u32,
+        &Some(MAX_SPONSORS_LIMIT),
+        &None,
+    );
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let first = Address::generate(&env);
+    asset_client.mint(&first, &1_000i128);
+    client.fund(&502u64, &first, &token_addr, &1_000i128, &1_000u64, &None);
+    for _ in 1..MAX_SPONSORS_LIMIT {
+        let sponsor = Address::generate(&env);
+        asset_client.mint(&sponsor, &1_000i128);
+        client.contribute(&502u64, &sponsor, &1_000i128);
+    }
+
+    // Measure the read on its own against the default per-invocation budget.
+    env.cost_estimate().budget().reset_default();
+    let contributions = client.get_contributions(&502u64);
+    assert_eq!(contributions.len(), MAX_SPONSORS_LIMIT);
+    assert_eq!(contributions.get(0).unwrap().sponsor, first);
+}
+
 // ── Re-funding after terminal state (#41) ──────────────────────────────────
 
 #[test]
