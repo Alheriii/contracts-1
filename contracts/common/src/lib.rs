@@ -84,6 +84,12 @@ pub const MAX_SPONSORS: u32 = 20;
 /// Maximum number of recipients allowed in a payout split.
 pub const MAX_RECIPIENTS: u32 = 20;
 
+/// Maximum number of issue allocations per milestone (#797).
+/// A milestone whose `allocations` Map reaches this limit rejects further
+/// `allocate` calls with `TooManyAllocations`, keeping the per-record
+/// footprint bounded regardless of remaining_budget.
+pub const MAX_ALLOCATIONS: u32 = 100;
+
 /// Maximum allowed single-step fee change (basis points) - Issue #20
 /// Prevents accidental or malicious fee spikes (e.g., 2.5% to 99%)
 pub const MAX_FEE_CHANGE_BPS: u32 = 500; // 5% maximum change per call

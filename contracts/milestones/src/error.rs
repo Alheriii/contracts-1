@@ -48,4 +48,7 @@ pub enum Error {
     InvalidMaxSponsors = 24,
     /// The payout recipient list exceeds `MAX_RECIPIENTS`.
     TooManyRecipients = 25,
+    /// `allocate` was called on a milestone that already has `MAX_ALLOCATIONS`
+    /// issue entries in its `allocations` Map (#797).
+    TooManyAllocations = 26,
 }
