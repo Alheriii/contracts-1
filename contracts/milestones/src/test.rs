@@ -2771,3 +2771,44 @@ fn test_create_milestone_accepts_future_deadline() {
     // deadline = 501 > 500: must succeed
     client.create_milestone(&1u64, &sponsor, &token_addr, &1_000i128, &501u64);
 }
+
+// ── Regression: issue #489 / #831 ─────────────────────────────────────────────
+
+#[test]
+fn test_allocate_rejects_at_and_after_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(100u64);
+
+    let (_admin, _treasury, client) = setup(&env);
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    client.create_milestone(&831u64, &sponsor, &token_addr, &10_000i128, &1_000u64);
+
+    // One second before the deadline: allocation still allowed.
+    env.ledger().set_timestamp(999u64);
+    client.allocate(&831u64, &1u64, &1_000i128);
+
+    // now == deadline: rejected (guard is `now >= deadline`).
+    env.ledger().set_timestamp(1_000u64);
+    let err = client.try_allocate(&831u64, &2u64, &1_000i128);
+    assert_eq!(err, Err(Ok(Error::DeadlinePassed)));
+
+    // now > deadline: rejected.
+    env.ledger().set_timestamp(1_001u64);
+    let err = client.try_allocate(&831u64, &3u64, &1_000i128);
+    assert_eq!(err, Err(Ok(Error::DeadlinePassed)));
+
+    // Rejected allocations leave no trace: budget untouched, no issue status written.
+    let milestone = client.get_milestone(&831u64);
+    assert_eq!(milestone.remaining_budget, 9_000i128);
+    assert!(!milestone.allocations.contains_key(2u64));
+    assert!(!milestone.allocations.contains_key(3u64));
+    assert_eq!(
+        client.try_get_issue_status(&831u64, &2u64),
+        Err(Ok(Error::IssueNotAllocated))
+    );
+}
