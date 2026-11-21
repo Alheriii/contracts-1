@@ -343,7 +343,10 @@ mod contract {
                 },
             );
 
-            if actual_received <= 0 {
+            if actual_received < 0 {
+                return Err(Error::DeflationaryTransfer);
+            }
+            if actual_received == 0 {
                 return Err(Error::InvalidAmount);
             }
 
@@ -453,7 +456,10 @@ mod contract {
                 },
             );
 
-            if actual_received <= 0 {
+            if actual_received < 0 {
+                return Err(Error::DeflationaryTransfer);
+            }
+            if actual_received == 0 {
                 return Err(Error::InvalidAmount);
             }
 

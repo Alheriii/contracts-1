@@ -41,4 +41,7 @@ pub enum Error {
     InvalidVersion = 19,
     /// The payout recipient list exceeds `MAX_RECIPIENTS`.
     TooManyRecipients = 20,
+    /// The token took a fee on transfer so the contract received less than zero
+    /// (deflationary / fee-on-transfer token reduced the contract balance).
+    DeflationaryTransfer = 21,
 }
