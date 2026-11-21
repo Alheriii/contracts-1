@@ -836,9 +836,10 @@ mod contract {
         /// Admin-only: rotate the oracle address. Requires both current admin
         /// and new oracle authorization.
         pub fn set_oracle(env: Env, new_oracle: Address) -> Result<(), Error> {
-            let old_oracle = require_oracle(&env)?;
+            // Authorization first — matches escrow::set_oracle ordering (#799).
             require_admin(&env)?.require_auth();
             new_oracle.require_auth();
+            let old_oracle = require_oracle(&env)?;
             env.storage().instance().set(&DataKey::Oracle, &new_oracle);
             extend_instance_ttl(&env);
             OracleChanged {
