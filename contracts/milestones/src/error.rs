@@ -48,4 +48,7 @@ pub enum Error {
     InvalidMaxSponsors = 24,
     /// The payout recipient list exceeds `MAX_RECIPIENTS`.
     TooManyRecipients = 25,
+    /// The token took a fee on transfer so the contract received less than zero
+    /// (deflationary / fee-on-transfer token reduced the contract balance).
+    DeflationaryTransfer = 26,
 }

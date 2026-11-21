@@ -188,11 +188,12 @@ where
     let balance_before = token_client.balance(contract_addr);
     operation();
     let balance_after = token_client.balance(contract_addr);
-    // A malicious or deflationary token could leave `balance_after <
-    // balance_before`; a plain `-` would panic (abort) under
-    // `overflow-checks = true`. Saturate at 0: callers already reject
-    // `actual_received <= 0` with `InvalidAmount`.
-    balance_after.saturating_sub(balance_before)
+    // Return the true signed delta. A deflationary / fee-on-transfer token can
+    // leave `balance_after < balance_before` (negative delta). Callers must
+    // distinguish that case (Error::DeflationaryTransfer) from a legitimately
+    // zero amount (Error::InvalidAmount). Previously this saturated at 0, which
+    // collapsed both situations into the same error (#830).
+    balance_after - balance_before
 }
 
 /// Extends a persistent entry's TTL to (approximately) survive until
