@@ -548,7 +548,11 @@ mod contract {
                 mergefi_common::get_fee_bps::<DataKey>(&env).ok_or(Error::NotInitialized)?;
             let payouts = mergefi_common::compute_split(&env, escrow.amount, fee_bps, &recipients)
                 .map_err(|e| match e {
-                    mergefi_common::SplitError::InvalidSplit => Error::InvalidSplit,
+                    mergefi_common::SplitError::EmptyRecipients
+                    | mergefi_common::SplitError::ZeroWeight
+                    | mergefi_common::SplitError::DuplicateRecipient
+                    | mergefi_common::SplitError::WeightMismatch
+                    | mergefi_common::SplitError::InvalidSplit => Error::InvalidSplit,
                     mergefi_common::SplitError::SelfPayout => Error::SelfPayout,
                     mergefi_common::SplitError::TooManyRecipients => Error::TooManyRecipients,
                     mergefi_common::SplitError::Overflow => Error::ArithmeticOverflow,
