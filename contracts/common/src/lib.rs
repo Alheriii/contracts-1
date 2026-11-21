@@ -113,17 +113,25 @@ pub fn validate_fee_change(old_fee: u32, new_fee: u32) -> Result<(), FeeChangeEr
     Ok(())
 }
 
+/// Flat `extend_to` target for persistent storage: ~500 000 ledgers ≈ 29 days
+/// at Stellar's approximate 5-second ledger-close time.  Used by both
+/// `extend_ttl` (the fixed bump) and `extend_ttl_for_target` (the deadline-
+/// scaled bump's minimum), so tuning this one constant keeps both helpers in
+/// sync (#826).
+pub const PERSISTENT_TTL_EXTEND_TO: u32 = 500_000;
+
 /// Extends the persistent storage TTL using fixed thresholds.
 ///
 /// At ~5 seconds per ledger close (Stellar testnet/mainnet average, see `APPROX_SECONDS_PER_LEDGER`):
 /// - `threshold = 100_000` ledgers corresponds to ~500,000 seconds (~5.78 days).
 ///   Extension is only performed if remaining TTL is below this threshold.
-/// - `extend_to = 500_000` ledgers corresponds to ~2,500,000 seconds (~28.93 days).
+/// - `extend_to = PERSISTENT_TTL_EXTEND_TO` ledgers (~28.93 days of runway).
 ///   When triggered, TTL is extended to approximately 29 days of runway.
 pub fn extend_ttl<K>(env: &Env, key: &K)
 where
     K: IntoVal<Env, Val>,
 {
+    env.storage().persistent().extend_ttl(key, 100_000, PERSISTENT_TTL_EXTEND_TO);
     env.storage()
         .persistent()
         .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
@@ -234,9 +242,9 @@ where
     let max_extend_to =
         (env.ledger().max_live_until_ledger() as u64).saturating_sub(current_sequence);
 
-    // Baseline 500_000 mirrors extend_ttl's own extend_to — never do worse
-    // than the flat bump every other call site still gets.
-    let extend_to = ledgers_until_target.max(500_000).min(max_extend_to);
+    // Baseline mirrors extend_ttl's own extend_to via the shared constant —
+    // never do worse than the flat bump every other call site still gets (#826).
+    let extend_to = ledgers_until_target.max(PERSISTENT_TTL_EXTEND_TO as u64).min(max_extend_to);
     let extend_to = u32::try_from(extend_to).unwrap_or(u32::MAX);
 
     // threshold == extend_to: "ensure at least extend_to ledgers remain,"
