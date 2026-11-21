@@ -848,9 +848,12 @@ mod contract {
             Ok(())
         }
 
-        /// Pause the contract, blocking new milestones, contributions,
-        /// allocations, deallocations, and release payouts. Refund/recovery paths
-        /// remain open.
+        /// Pause the contract. Blocked calls: `create_milestone`, `contribute`,
+        /// `allocate`, `release_issue`.
+        /// Still available while paused: `deallocate` (intentionally not
+        /// pause-gated), `cancel_milestone`, `cancel_milestone_after_deadline`,
+        /// `keep_alive`, all `get_*` views, `unpause`, `set_admin`, `set_oracle`,
+        /// `set_treasury`, `set_fee_bps`, `recover_admin`, `migrate`, `upgrade`.
         pub fn pause(env: Env) -> Result<(), Error> {
             let admin = require_admin(&env)?;
             admin.require_auth();
